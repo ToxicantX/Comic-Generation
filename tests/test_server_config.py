@@ -650,6 +650,67 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(captured_env["timeout"], "333")
         self.assertEqual(captured_env["stream"], "true")
 
+    def test_refresh_setting_prompt_ai_mode_uses_fallback_chapter_evidence(self):
+        server = load_server_module()
+        setting = {
+            "id": 45,
+            "project_slug": "ssj",
+            "project_title": "搜神记",
+            "item_type": "location",
+            "name": "主角初遇神农使者的荒原场景",
+            "aliases": [],
+            "description": "主角在荒原中遇到神农使者的关键场景。",
+            "visual_prompt": "",
+            "negative_prompt": "",
+            "first_chapter_number": 1,
+            "chapter_numbers": [1],
+            "relations": {},
+            "source_evidence": [],
+            "importance": "normal",
+            "review_status": "pending_review",
+            "locked": False,
+            "raw": {},
+        }
+        chapters = [{
+            "chapter_number": 1,
+            "title": "神农使者",
+            "raw": {"excerpt": "荒原暮色沉沉，少年拓拔野看见神农使者自风沙中走来，铜铃声在草海间回荡。"},
+        }]
+
+        def fake_chat_json(*_args, **_kwargs):
+            return {
+                "description": "荒原场景中，拓拔野初遇神农使者，风沙、草海和铜铃声形成关键气氛。",
+                "visual_prompt": "荒原暮色，草海风沙，少年拓拔野远望神农使者，铜铃声，东方上古神话漫画场景。",
+                "negative_prompt": "modern city, text",
+                "aliases": ["荒原初遇"],
+                "chapter_numbers": [1],
+                "feature_phrases": ["荒原暮色", "草海风沙", "铜铃声"],
+                "importance": "high",
+                "_model": "test-text-model",
+            }
+
+        with patch.object(server, "ensure_database"):
+            with patch.object(server, "runtime_config", return_value={
+                "COMIC_PIPELINE_TEXT_MODEL": "configured-novel-model",
+                "COMIC_PIPELINE_TEXT_ENV_PATH": "/tmp/text.env",
+                "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "333",
+                "COMIC_PIPELINE_TEXT_MODEL_STREAM": "true",
+            }):
+                with patch.object(server.db, "get_setting_item", return_value=setting):
+                    with patch.object(server.db, "list_chapters", return_value=chapters):
+                        with patch.object(server, "chat_json", side_effect=fake_chat_json) as chat_mock:
+                            result = server.refresh_setting_prompt_api(45, {
+                                "mode": "overwrite",
+                                "extraction_mode": "ai",
+                            })
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["enhancement"]["used"])
+        self.assertTrue(chat_mock.called)
+        self.assertIn("荒原暮色", result["editor_payload"]["visual_prompt"])
+        self.assertTrue(result["candidate"]["source_evidence"])
+        self.assertEqual(result["candidate"]["source_evidence"][0]["type"], "fallback_chapter_context")
+
 
 if __name__ == "__main__":
     unittest.main()

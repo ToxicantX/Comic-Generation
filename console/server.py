@@ -6236,6 +6236,115 @@ def setting_aliases(setting: dict) -> list[str]:
     return [str(item).strip() for item in aliases if str(item).strip()]
 
 
+def normalized_source_evidence_items(value) -> list[dict]:
+    items = value if isinstance(value, list) else []
+    output: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = compact_text(item.get("text") or "", 260)
+        if not text:
+            continue
+        output.append({
+            **item,
+            "text": text,
+        })
+    return output
+
+
+def setting_reference_chapter_numbers(setting: dict) -> list[int]:
+    numbers: list[int] = []
+    for value in setting.get("chapter_numbers") or []:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in numbers:
+            numbers.append(number)
+    try:
+        first = int(setting.get("first_chapter_number") or 0)
+    except (TypeError, ValueError):
+        first = 0
+    if first > 0 and first not in numbers:
+        numbers.insert(0, first)
+    return numbers
+
+
+def setting_recall_terms(setting: dict) -> list[str]:
+    terms: list[str] = []
+    raw = setting.get("raw") if isinstance(setting.get("raw"), dict) else {}
+    sources = [
+        setting.get("name") or "",
+        " ".join(setting_aliases(setting)),
+        setting.get("description") or "",
+        setting.get("visual_prompt") or "",
+        " ".join(str(item) for item in raw.get("feature_phrases") or [] if str(item).strip()),
+    ]
+    stop_words = {
+        "角色", "设定", "视觉", "提示", "提示词", "关键", "场景", "主角", "世界观",
+        "需要", "人工", "确认", "漫画", "东方", "上古", "神话", "幻想",
+    }
+    for source in sources:
+        for token in tokenize_setting_instruction(str(source)):
+            if token in stop_words or len(token) < 2:
+                continue
+            if token not in terms:
+                terms.append(token)
+    return terms[:16]
+
+
+def fallback_setting_evidence(setting: dict, chapters: list[dict], max_items: int = 6) -> list[dict]:
+    existing = normalized_source_evidence_items(setting.get("source_evidence"))
+    if existing:
+        return existing[:max_items]
+
+    referenced_numbers = set(setting_reference_chapter_numbers(setting))
+    recall_terms = setting_recall_terms(setting)
+    scored: list[tuple[int, int, dict, str]] = []
+    for index, chapter in enumerate(chapters):
+        text = chapter_setting_scan_text(chapter)
+        if not text:
+            continue
+        chapter_number = int(chapter.get("chapter_number") or 0)
+        score = 0
+        if chapter_number in referenced_numbers:
+            score += 80
+        score += sum(text.count(term) * 8 for term in recall_terms if term and term in text)
+        if score:
+            scored.append((score, -chapter_number if chapter_number else -index, chapter, text))
+
+    if not scored and referenced_numbers:
+        for index, chapter in enumerate(chapters):
+            chapter_number = int(chapter.get("chapter_number") or 0)
+            if chapter_number not in referenced_numbers:
+                continue
+            text = chapter_setting_scan_text(chapter)
+            if text:
+                scored.append((40, -chapter_number if chapter_number else -index, chapter, text))
+
+    if not scored:
+        for index, chapter in enumerate(chapters[:max_items]):
+            text = chapter_setting_scan_text(chapter)
+            if text:
+                chapter_number = int(chapter.get("chapter_number") or 0)
+                scored.append((10, -chapter_number if chapter_number else -index, chapter, text))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    evidence: list[dict] = []
+    for score, _order, chapter, text in scored[:max_items]:
+        chapter_number = int(chapter.get("chapter_number") or 0)
+        title = str(chapter.get("title") or "").strip()
+        evidence.append({
+            "type": "fallback_chapter_context",
+            "chapter_number": chapter_number,
+            "chapter_title": title,
+            "matched_term": next((term for term in recall_terms if term and term in text), ""),
+            "text": character_context_snippet(text, str(setting.get("name") or "").strip() or title),
+            "score": score,
+        })
+    return evidence
+
+
 def extract_target_character_candidate(setting: dict, chapters: list[dict]) -> dict:
     name = str(setting.get("name") or "").strip()
     search_terms = [name, *setting_aliases(setting)]
@@ -6276,6 +6385,8 @@ def extract_target_character_candidate(setting: dict, chapters: list[dict]) -> d
                 feature_phrases.append(phrase)
             if len(feature_phrases) >= 4:
                 break
+    if not row["source_evidence"]:
+        row["source_evidence"] = fallback_setting_evidence(setting, chapters)
     feature_text = "；".join(feature_phrases) if feature_phrases else "原文暂未提取到稳定外貌特征，需人工补充面部、发型、服饰、体型、气质和标志物"
     return {
         "item_type": "character",
@@ -6334,6 +6445,8 @@ def extract_generic_setting_prompt_candidate(setting: dict, chapters: list[dict]
                 "matched_term": name,
                 "text": character_context_snippet(text, name),
             })
+    if not matched:
+        matched = fallback_setting_evidence(setting, chapters)
     chapter_numbers = sorted(chapter_numbers)
     label = setting_type_label(item_type)
     evidence_text = "；".join(item.get("text", "") for item in matched[:2] if item.get("text"))
