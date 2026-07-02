@@ -1,0 +1,1332 @@
+{
+  "id": "d3c6d86e-f982-4a31-9d8e-8e618c1f8e20",
+  "revision": 2,
+  "last_node_id": 10,
+  "last_link_id": 15,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ComicNovelSource",
+      "pos": [
+        80,
+        120
+      ],
+      "size": [
+        420,
+        260
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "novel_path",
+          "name": "novel_path",
+          "type": "STRING",
+          "widget": {
+            "name": "novel_path"
+          },
+          "link": null
+        },
+        {
+          "label": "episode_number",
+          "name": "episode_number",
+          "type": "INT",
+          "widget": {
+            "name": "episode_number"
+          },
+          "link": null
+        },
+        {
+          "label": "pages",
+          "name": "pages",
+          "type": "INT",
+          "widget": {
+            "name": "pages"
+          },
+          "link": null
+        },
+        {
+          "label": "excerpt_chars",
+          "name": "excerpt_chars",
+          "type": "INT",
+          "widget": {
+            "name": "excerpt_chars"
+          },
+          "link": null
+        },
+        {
+          "label": "encoding",
+          "name": "encoding",
+          "type": "STRING",
+          "widget": {
+            "name": "encoding"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "source_json",
+          "name": "source_json",
+          "type": "STRING",
+          "links": [
+            1
+          ]
+        },
+        {
+          "label": "episode_number",
+          "name": "episode_number",
+          "type": "INT",
+          "links": [
+            12,
+            13,
+            14
+          ]
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicNovelSource"
+      },
+      "widgets_values": [
+        "E:\\workspace\\ComfyUIProjects",
+        "E:\\workspace\\ComfyUIProjects\\搜神记.txt",
+        3,
+        8,
+        3600,
+        "gb18030"
+      ],
+      "title": "1. 小说选择 / 章节参数"
+    },
+    {
+      "id": 2,
+      "type": "ComicAIBreakdown",
+      "pos": [
+        620,
+        120
+      ],
+      "size": [
+        500,
+        360
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "source_json",
+          "name": "source_json",
+          "type": "STRING",
+          "link": 1
+        },
+        {
+          "label": "action",
+          "name": "action",
+          "type": "COMBO",
+          "widget": {
+            "name": "action"
+          },
+          "link": null
+        },
+        {
+          "label": "force",
+          "name": "force",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "force"
+          },
+          "link": null
+        },
+        {
+          "label": "overwrite_page_plans",
+          "name": "overwrite_page_plans",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "overwrite_page_plans"
+          },
+          "link": null
+        },
+        {
+          "label": "refine_page_plans",
+          "name": "refine_page_plans",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "refine_page_plans"
+          },
+          "link": null
+        },
+        {
+          "label": "timeout_seconds",
+          "name": "timeout_seconds",
+          "type": "INT",
+          "widget": {
+            "name": "timeout_seconds"
+          },
+          "link": null
+        },
+        {
+          "label": "run_label",
+          "name": "run_label",
+          "type": "STRING",
+          "widget": {
+            "name": "run_label"
+          },
+          "link": null
+        },
+        {
+          "label": "result_path",
+          "name": "result_path",
+          "type": "STRING",
+          "widget": {
+            "name": "result_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "draft_result_json",
+          "name": "draft_result_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "draft_qa_json",
+          "name": "draft_qa_json",
+          "type": "STRING",
+          "links": [
+            2
+          ]
+        },
+        {
+          "label": "review_markdown",
+          "name": "review_markdown",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicAIBreakdown"
+      },
+      "widgets_values": [
+        "draft_from_novel",
+        false,
+        false,
+        true,
+        1800,
+        "ui_breakdown",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_modular_breakdown.json"
+      ],
+      "title": "2. AI拆解 / 分镜草稿QA"
+    },
+    {
+      "id": 7,
+      "type": "ComicFlowSwitch",
+      "pos": [
+        1220,
+        120
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "label": "stage_name",
+          "name": "stage_name",
+          "type": "STRING",
+          "widget": {
+            "name": "stage_name"
+          },
+          "link": null
+        },
+        {
+          "label": "note",
+          "name": "note",
+          "type": "STRING",
+          "widget": {
+            "name": "note"
+          },
+          "link": null
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "output_json",
+          "name": "output_json",
+          "type": "STRING",
+          "widget": {
+            "name": "output_json"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_on_open",
+          "name": "auto_run_on_open",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "auto_run_on_open"
+          },
+          "link": null
+        },
+        {
+          "label": "confirm_before_auto_run",
+          "name": "confirm_before_auto_run",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "confirm_before_auto_run"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_delay_ms",
+          "name": "auto_run_delay_ms",
+          "type": "INT",
+          "widget": {
+            "name": "auto_run_delay_ms"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "links": [
+            8
+          ]
+        },
+        {
+          "label": "switch_json",
+          "name": "switch_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicFlowSwitch"
+      },
+      "widgets_values": [
+        false,
+        "草稿审核通过",
+        "先查看 AI 拆解产出的草稿 QA 和分镜页计划；确认剧情、页数、角色、场景与画面方向可用后再打开。打开后会把人工审核结果传给生成阶段。",
+        "E:\\workspace\\ComfyUIProjects",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_switch_draft_approved.json",
+        true,
+        false,
+        500
+      ],
+      "title": "3A. 开关：草稿审核通过"
+    },
+    {
+      "id": 3,
+      "type": "ComicHumanApprovalGate",
+      "pos": [
+        1640,
+        120
+      ],
+      "size": [
+        460,
+        310
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "draft_qa_json",
+          "name": "draft_qa_json",
+          "type": "STRING",
+          "link": 2
+        },
+        {
+          "label": "approve",
+          "name": "approve",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "approve"
+          },
+          "link": 8
+        },
+        {
+          "label": "page_ids",
+          "name": "page_ids",
+          "type": "STRING",
+          "widget": {
+            "name": "page_ids"
+          },
+          "link": null
+        },
+        {
+          "label": "reviewer",
+          "name": "reviewer",
+          "type": "STRING",
+          "widget": {
+            "name": "reviewer"
+          },
+          "link": null
+        },
+        {
+          "label": "note",
+          "name": "note",
+          "type": "STRING",
+          "widget": {
+            "name": "note"
+          },
+          "link": null
+        },
+        {
+          "label": "output_json",
+          "name": "output_json",
+          "type": "STRING",
+          "widget": {
+            "name": "output_json"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "approved",
+          "name": "approved",
+          "type": "BOOLEAN",
+          "links": [
+            3
+          ]
+        },
+        {
+          "label": "approval_json",
+          "name": "approval_json",
+          "type": "STRING",
+          "links": [
+            4
+          ]
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicHumanApprovalGate"
+      },
+      "widgets_values": [
+        "",
+        "human_reviewer",
+        "草稿 QA 已人工确认后保留此记录。未确认时不要打开 3A；如只想通过部分页面，可在 page_ids 填写页号列表。",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_modular_human_approval.json"
+      ],
+      "title": "3B. 记录人工审核结果"
+    },
+    {
+      "id": 8,
+      "type": "ComicFlowSwitch",
+      "pos": [
+        2180,
+        120
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "label": "stage_name",
+          "name": "stage_name",
+          "type": "STRING",
+          "widget": {
+            "name": "stage_name"
+          },
+          "link": null
+        },
+        {
+          "label": "note",
+          "name": "note",
+          "type": "STRING",
+          "widget": {
+            "name": "note"
+          },
+          "link": null
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "output_json",
+          "name": "output_json",
+          "type": "STRING",
+          "widget": {
+            "name": "output_json"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_on_open",
+          "name": "auto_run_on_open",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "auto_run_on_open"
+          },
+          "link": null
+        },
+        {
+          "label": "confirm_before_auto_run",
+          "name": "confirm_before_auto_run",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "confirm_before_auto_run"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_delay_ms",
+          "name": "auto_run_delay_ms",
+          "type": "INT",
+          "widget": {
+            "name": "auto_run_delay_ms"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "links": [
+            9
+          ]
+        },
+        {
+          "label": "switch_json",
+          "name": "switch_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicFlowSwitch"
+      },
+      "widgets_values": [
+        false,
+        "确认生成漫画",
+        "草稿已通过后再打开；此阶段会触发真实图片生成，可能消耗模型或接口额度。测试时建议先把 4B 的 max_panels=1、max_batches=1。",
+        "E:\\workspace\\ComfyUIProjects",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_switch_allow_generation.json",
+        true,
+        true,
+        500
+      ],
+      "title": "4A. 开关：确认生成漫画"
+    },
+    {
+      "id": 4,
+      "type": "ComicGenerateBatch",
+      "pos": [
+        2600,
+        120
+      ],
+      "size": [
+        500,
+        350
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "approved",
+          "name": "approved",
+          "type": "BOOLEAN",
+          "link": 3
+        },
+        {
+          "label": "approval_json",
+          "name": "approval_json",
+          "type": "STRING",
+          "link": 4
+        },
+        {
+          "label": "allow_generation",
+          "name": "allow_generation",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "allow_generation"
+          },
+          "link": 9
+        },
+        {
+          "label": "episode_number",
+          "name": "episode_number",
+          "type": "INT",
+          "widget": {
+            "name": "episode_number"
+          },
+          "link": 12
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "comfy_url",
+          "name": "comfy_url",
+          "type": "STRING",
+          "widget": {
+            "name": "comfy_url"
+          },
+          "link": null
+        },
+        {
+          "label": "max_panels",
+          "name": "max_panels",
+          "type": "STRING",
+          "widget": {
+            "name": "max_panels"
+          },
+          "link": null
+        },
+        {
+          "label": "max_batches",
+          "name": "max_batches",
+          "type": "STRING",
+          "widget": {
+            "name": "max_batches"
+          },
+          "link": null
+        },
+        {
+          "label": "run_label",
+          "name": "run_label",
+          "type": "STRING",
+          "widget": {
+            "name": "run_label"
+          },
+          "link": null
+        },
+        {
+          "label": "result_path",
+          "name": "result_path",
+          "type": "STRING",
+          "widget": {
+            "name": "result_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "generation_result_json",
+          "name": "generation_result_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicGenerateBatch"
+      },
+      "widgets_values": [
+        "E:\\workspace\\ComfyUIProjects",
+        "http://127.0.0.1:8188",
+        "1",
+        "1",
+        "ui_generate",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_modular_generation.json"
+      ],
+      "title": "4B. 小批量生成漫画"
+    },
+    {
+      "id": 9,
+      "type": "ComicFlowSwitch",
+      "pos": [
+        2600,
+        620
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "label": "stage_name",
+          "name": "stage_name",
+          "type": "STRING",
+          "widget": {
+            "name": "stage_name"
+          },
+          "link": null
+        },
+        {
+          "label": "note",
+          "name": "note",
+          "type": "STRING",
+          "widget": {
+            "name": "note"
+          },
+          "link": null
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "output_json",
+          "name": "output_json",
+          "type": "STRING",
+          "widget": {
+            "name": "output_json"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_on_open",
+          "name": "auto_run_on_open",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "auto_run_on_open"
+          },
+          "link": null
+        },
+        {
+          "label": "confirm_before_auto_run",
+          "name": "confirm_before_auto_run",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "confirm_before_auto_run"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_delay_ms",
+          "name": "auto_run_delay_ms",
+          "type": "INT",
+          "widget": {
+            "name": "auto_run_delay_ms"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "links": [
+            10
+          ]
+        },
+        {
+          "label": "switch_json",
+          "name": "switch_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicFlowSwitch"
+      },
+      "widgets_values": [
+        false,
+        "启动页面审核QA",
+        "确认本批图片已生成并可在输出目录看到后打开。打开后会组装页面并检查文字、画面完整性和连续性；不通过会阻塞下一章。",
+        "E:\\workspace\\ComfyUIProjects",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_switch_page_review.json",
+        true,
+        false,
+        500
+      ],
+      "title": "5A. 开关：启动页面审核"
+    },
+    {
+      "id": 5,
+      "type": "ComicPageReviewQA",
+      "pos": [
+        3020,
+        620
+      ],
+      "size": [
+        500,
+        330
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "episode_number",
+          "name": "episode_number",
+          "type": "INT",
+          "widget": {
+            "name": "episode_number"
+          },
+          "link": 13
+        },
+        {
+          "label": "review_action",
+          "name": "review_action",
+          "type": "COMBO",
+          "widget": {
+            "name": "review_action"
+          },
+          "link": null
+        },
+        {
+          "label": "review_enabled",
+          "name": "review_enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "review_enabled"
+          },
+          "link": 10
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "comfy_url",
+          "name": "comfy_url",
+          "type": "STRING",
+          "widget": {
+            "name": "comfy_url"
+          },
+          "link": null
+        },
+        {
+          "label": "timeout_seconds",
+          "name": "timeout_seconds",
+          "type": "INT",
+          "widget": {
+            "name": "timeout_seconds"
+          },
+          "link": null
+        },
+        {
+          "label": "run_label",
+          "name": "run_label",
+          "type": "STRING",
+          "widget": {
+            "name": "run_label"
+          },
+          "link": null
+        },
+        {
+          "label": "result_path",
+          "name": "result_path",
+          "type": "STRING",
+          "widget": {
+            "name": "result_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "review_result_json",
+          "name": "review_result_json",
+          "type": "STRING",
+          "links": [
+            15
+          ]
+        },
+        {
+          "label": "status_json",
+          "name": "status_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "preview_html",
+          "name": "preview_html",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicPageReviewQA"
+      },
+      "widgets_values": [
+        "assemble_and_qa",
+        "E:\\workspace\\ComfyUIProjects",
+        "http://127.0.0.1:8188",
+        1800,
+        "ui_page_review",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_modular_page_review.json"
+      ],
+      "title": "5B. 页面组装 / 质量审核"
+    },
+    {
+      "id": 10,
+      "type": "ComicFlowSwitch",
+      "pos": [
+        3560,
+        120
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        },
+        {
+          "label": "stage_name",
+          "name": "stage_name",
+          "type": "STRING",
+          "widget": {
+            "name": "stage_name"
+          },
+          "link": null
+        },
+        {
+          "label": "note",
+          "name": "note",
+          "type": "STRING",
+          "widget": {
+            "name": "note"
+          },
+          "link": null
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "output_json",
+          "name": "output_json",
+          "type": "STRING",
+          "widget": {
+            "name": "output_json"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_on_open",
+          "name": "auto_run_on_open",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "auto_run_on_open"
+          },
+          "link": null
+        },
+        {
+          "label": "confirm_before_auto_run",
+          "name": "confirm_before_auto_run",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "confirm_before_auto_run"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_run_delay_ms",
+          "name": "auto_run_delay_ms",
+          "type": "INT",
+          "widget": {
+            "name": "auto_run_delay_ms"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "links": [
+            11
+          ]
+        },
+        {
+          "label": "switch_json",
+          "name": "switch_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicFlowSwitch"
+      },
+      "widgets_values": [
+        false,
+        "进入下一章循环",
+        "仅在 5B 页面审核通过后打开。不通过时保持关闭，先修正图片、分镜或提示，再重新生成和审核。打开后会创建下一章骨架并回到选章拆解。",
+        "E:\\workspace\\ComfyUIProjects",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_switch_next_episode.json",
+        true,
+        false,
+        500
+      ],
+      "title": "6A. 开关：进入下一章循环"
+    },
+    {
+      "id": 6,
+      "type": "ComicNextEpisode",
+      "pos": [
+        3980,
+        120
+      ],
+      "size": [
+        460,
+        290
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "current_episode_number",
+          "name": "current_episode_number",
+          "type": "INT",
+          "widget": {
+            "name": "current_episode_number"
+          },
+          "link": 14
+        },
+        {
+          "label": "review_result_json",
+          "name": "review_result_json",
+          "type": "STRING",
+          "link": 15
+        },
+        {
+          "label": "create_skeleton_if_missing",
+          "name": "create_skeleton_if_missing",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "create_skeleton_if_missing"
+          },
+          "link": null
+        },
+        {
+          "label": "continue_enabled",
+          "name": "continue_enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "continue_enabled"
+          },
+          "link": 11
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "pages",
+          "name": "pages",
+          "type": "INT",
+          "widget": {
+            "name": "pages"
+          },
+          "link": null
+        },
+        {
+          "label": "result_path",
+          "name": "result_path",
+          "type": "STRING",
+          "widget": {
+            "name": "result_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "next_episode_number",
+          "name": "next_episode_number",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "label": "next_source_json",
+          "name": "next_source_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicNextEpisode"
+      },
+      "widgets_values": [
+        true,
+        "E:\\workspace\\ComfyUIProjects",
+        8,
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_modular_next_episode.json"
+      ],
+      "title": "6B. 创建下一章骨架"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "STRING"
+    ],
+    [
+      2,
+      2,
+      1,
+      3,
+      0,
+      "STRING"
+    ],
+    [
+      8,
+      7,
+      0,
+      3,
+      1,
+      "BOOLEAN"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      0,
+      "BOOLEAN"
+    ],
+    [
+      4,
+      3,
+      1,
+      4,
+      1,
+      "STRING"
+    ],
+    [
+      9,
+      8,
+      0,
+      4,
+      2,
+      "BOOLEAN"
+    ],
+    [
+      10,
+      9,
+      0,
+      5,
+      7,
+      "BOOLEAN"
+    ],
+    [
+      11,
+      10,
+      0,
+      6,
+      5,
+      "BOOLEAN"
+    ],
+    [
+      12,
+      1,
+      1,
+      4,
+      3,
+      "INT"
+    ],
+    [
+      13,
+      1,
+      1,
+      5,
+      0,
+      "INT"
+    ],
+    [
+      14,
+      1,
+      1,
+      6,
+      0,
+      "INT"
+    ],
+    [
+      15,
+      5,
+      0,
+      6,
+      1,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "title": "小说到漫画蓝图：选章 -> AI拆解 -> 人工审核 -> 小批量生成 -> 页面审核 -> 下一章循环",
+      "bounding": [
+        40,
+        60,
+        4450,
+        940
+      ],
+      "color": "#2f6f73",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.55,
+      "offset": [
+        20,
+        80
+      ]
+    }
+  },
+  "version": 0.4
+}

@@ -1,0 +1,364 @@
+<mxfile host="app.diagrams.net" modified="2026-06-18T00:00:00.000Z" agent="Codex" version="26.0.0" type="device">
+  <diagram id="comic-pipeline-blueprint" name="漫画流水线蓝图">
+    <mxGraphModel dx="2140" dy="1280" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3060" pageHeight="1240" math="0" shadow="0" adaptiveColors="auto">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="lane_config" value="配置 / 部署" style="swimlane;horizontal=0;startSize=110;fillColor=#eef6ff;strokeColor=#6c8ebf;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="0" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_entry" value="人工入口" style="swimlane;horizontal=0;startSize=110;fillColor=#fff8e8;strokeColor=#d6b656;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="150" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_ai" value="AI 拆解" style="swimlane;horizontal=0;startSize=110;fillColor=#f3f0ff;strokeColor=#9673a6;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="300" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_review" value="拆解审核 / 开关" style="swimlane;horizontal=0;startSize=110;fillColor=#fff0e9;strokeColor=#c66a2b;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="450" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_generate" value="漫画生成" style="swimlane;horizontal=0;startSize=110;fillColor=#edf7f1;strokeColor=#82b366;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="600" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_result" value="结果查看" style="swimlane;horizontal=0;startSize=110;fillColor=#f6f7f9;strokeColor=#666666;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="750" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_qa" value="QA 与循环" style="swimlane;horizontal=0;startSize=110;fillColor=#fff9e6;strokeColor=#d79b00;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="900" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane_error" value="异常处理" style="swimlane;horizontal=0;startSize=110;fillColor=#fff1f1;strokeColor=#b85450;html=1;" vertex="1" parent="1">
+          <mxGeometry x="0" y="1050" width="2880" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1" value="独立包根目录&lt;br&gt;comic-pipeline" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="120" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2" value="编辑 config/.env&lt;br&gt;通用参数" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="300" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3" value="编辑 config/image.env&lt;br&gt;图像 API Key" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="480" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c4" value="运行配置检查&lt;br&gt;check_config.ps1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="660" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c5" value="安装节点&lt;br&gt;install_to_comfyui.ps1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="840" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c6" value="重启 ComfyUI" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="1020" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c7" value="验证节点注册&lt;br&gt;/object_info" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="1200" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c8" value="验证前端扩展&lt;br&gt;/extensions" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="1380" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="c9" value="配置通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane_config">
+          <mxGeometry x="1560" y="35" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="h1" value="选择小说文件" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="120" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h2" value="选择章节&lt;br&gt;chapter_number" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="300" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h3" value="设置范围&lt;br&gt;页数 / 字数 / 编码" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="480" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h4" value="选择拆解模板&lt;br&gt;题材 / 画风" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="660" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h5" value="打开 AI 拆解开关" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="lane_entry">
+          <mxGeometry x="840" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h6" value="查看拆解文本&lt;br&gt;JSON / Markdown" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="1740" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h7" value="人工修订&lt;br&gt;人物 / 场景 / 分镜" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;" vertex="1" parent="lane_entry">
+          <mxGeometry x="1920" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h8" value="打开生成开关" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="lane_entry">
+          <mxGeometry x="2280" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="h9" value="打开下一章开关" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="lane_entry">
+          <mxGeometry x="2640" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a1" value="读取章节文本" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="840" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a2" value="章节摘要&lt;br&gt;冲突 / 节奏" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1020" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a3" value="人物与场景表&lt;br&gt;一致性约束" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1200" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a4" value="页面计划&lt;br&gt;每页剧情目标" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1380" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a5" value="分镜脚本&lt;br&gt;格子 / 构图 / 台词" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1560" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a6" value="提示词包&lt;br&gt;中文可审 / 英文可生成" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1740" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a7" value="草稿 QA&lt;br&gt;缺页 / 漏角色 / 冲突" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="1920" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="a8" value="输出拆解草稿&lt;br&gt;draft.json / review.md" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#f8f5ff;strokeColor=#9673a6;" vertex="1" parent="lane_ai">
+          <mxGeometry x="2100" y="38" width="140" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="r1" value="拆解审核通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#c66a2b;" vertex="1" parent="lane_review">
+          <mxGeometry x="2100" y="35" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2" value="草稿通过开关" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="lane_review">
+          <mxGeometry x="2280" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r3" value="退回修改&lt;br&gt;补场景 / 改提示 / 拆页" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_review">
+          <mxGeometry x="1740" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r4" value="生成确认通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#c66a2b;" vertex="1" parent="lane_review">
+          <mxGeometry x="2460" y="35" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1" value="读取图像配置&lt;br&gt;api_key_env_path" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="lane_generate">
+          <mxGeometry x="2460" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="g2" value="设置批次上限&lt;br&gt;max_batches / max_panels" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="lane_generate">
+          <mxGeometry x="2640" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3" value="提交 ComfyUI Queue&lt;br&gt;小批量生成" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="lane_generate">
+          <mxGeometry x="120" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4" value="逐页 / 逐格生成&lt;br&gt;失败可重试" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="lane_generate">
+          <mxGeometry x="300" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5" value="页面组装&lt;br&gt;panel 到 page" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="lane_generate">
+          <mxGeometry x="480" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="v1" value="拆解审稿包&lt;br&gt;JSON / Markdown" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="lane_result">
+          <mxGeometry x="2100" y="38" width="140" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="v2" value="成图目录&lt;br&gt;pages / panels" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="lane_result">
+          <mxGeometry x="480" y="38" width="140" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="v3" value="预览结果&lt;br&gt;contact sheet / preview_url" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="lane_result">
+          <mxGeometry x="660" y="38" width="140" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="v4" value="生成清单&lt;br&gt;manifest / QA inputs" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" vertex="1" parent="lane_result">
+          <mxGeometry x="840" y="38" width="140" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="q1" value="一致性检查&lt;br&gt;角色 / 场景 / 画风" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;" vertex="1" parent="lane_qa">
+          <mxGeometry x="840" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q2" value="文字排版检查&lt;br&gt;台词 / 气泡 / 阅读顺序" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;" vertex="1" parent="lane_qa">
+          <mxGeometry x="1020" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q3" value="页面审核通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="lane_qa">
+          <mxGeometry x="1200" y="35" width="140" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="q4" value="局部重生 / 修复&lt;br&gt;只改失败页或分镜" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_qa">
+          <mxGeometry x="660" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q5" value="页面通过开关" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="lane_qa">
+          <mxGeometry x="1380" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q6" value="创建下一章骨架&lt;br&gt;沿用人物设定" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;" vertex="1" parent="lane_qa">
+          <mxGeometry x="1560" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="q7" value="章节完成&lt;br&gt;等待下一章" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane_qa">
+          <mxGeometry x="1740" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="x1" value="API Key 缺失&lt;br&gt;补 image.env" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_error">
+          <mxGeometry x="480" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="x2" value="ComfyUI 不可达&lt;br&gt;检查地址 / 端口" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_error">
+          <mxGeometry x="1020" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="x3" value="缺少模型或节点&lt;br&gt;检查 checkpoint / custom_nodes" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_error">
+          <mxGeometry x="1200" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="x4" value="上游限流 / 生成失败&lt;br&gt;降低批次后重试" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_error">
+          <mxGeometry x="300" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="x5" value="QA 阻断&lt;br&gt;回到局部修复" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane_error">
+          <mxGeometry x="1380" y="45" width="140" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend" value="图例：实线为主流程，红色虚线为退回或异常；黄色节点是可人工控制的开关；菱形节点是审核口。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1f2937;strokeColor=#111827;fontColor=#ffffff;" vertex="1" parent="lane_error">
+          <mxGeometry x="1740" y="45" width="500" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c1_c2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c1" target="c2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c2_c3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c2" target="c3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c3_c4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c3" target="c4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c4_c5" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c4" target="c5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c5_c6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c5" target="c6" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c6_c7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c6" target="c7" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c7_c8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c7" target="c8" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c8_c9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c8" target="c9" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c9_h1" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="c9" target="h1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h1_h2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h1" target="h2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h2_h3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h2" target="h3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h3_h4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h3" target="h4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h4_h5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h4" target="h5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h5_a1" value="开始拆解" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h5" target="a1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a1_a2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a1" target="a2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a2_a3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a2" target="a3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a3_a4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a3" target="a4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a4_a5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a4" target="a5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a5_a6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a5" target="a6" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a6_a7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a6" target="a7" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a7_a8" value="产出" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="a7" target="a8" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_a8_v1" value="可视化查看" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;" edge="1" source="a8" target="v1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_v1_h6" value="打开审稿包" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;" edge="1" source="v1" target="h6" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h6_h7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h6" target="h7" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h7_r1" value="提交审核" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h7" target="r1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_r1_r2" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="r1" target="r2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_r1_r3" value="退回" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="r1" target="r3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_r3_a4" value="重拆页面计划" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="r3" target="a4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_r2_h8" value="允许生成" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="r2" target="h8" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h8_r4" value="确认" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="h8" target="r4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_r4_g1" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="r4" target="g1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g1_g2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="g1" target="g2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g2_g3" value="排队" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="g2" target="g3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g3_g4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="g3" target="g4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g4_g5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="g4" target="g5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g5_v2" value="输出" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;" edge="1" source="g5" target="v2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_v2_v3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;" edge="1" source="v2" target="v3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_v3_v4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#666666;" edge="1" source="v3" target="v4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_v4_q1" value="提交 QA" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="v4" target="q1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q1_q2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q1" target="q2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q2_q3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q2" target="q3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q3_q5" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q3" target="q5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q3_q4" value="退回" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="q3" target="q4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q4_g3" value="局部重生" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="q4" target="g3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q5_q6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q5" target="q6" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q6_q7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q6" target="q7" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q6_h9" value="准备下一章" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1f2937;" edge="1" source="q6" target="h9" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_h9_h2" value="下一章循环" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d79b00;dashed=1;" edge="1" source="h9" target="h2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c4_x1" value="失败" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="c4" target="x1" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c6_x2" value="不可达" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="c6" target="x2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c7_x3" value="缺失" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="c7" target="x3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_g4_x4" value="失败" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="g4" target="x4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q3_x5" value="阻断" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="q3" target="x5" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_x1_c3" value="补配置后重试" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="x1" target="c3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_x2_c6" value="重启后验证" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="x2" target="c6" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_x3_c7" value="安装后验证" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="x3" target="c7" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_x4_g2" value="降批次重试" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="x4" target="g2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_x5_q4" value="修复" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#b85450;dashed=1;" edge="1" source="x5" target="q4" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

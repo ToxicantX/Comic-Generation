@@ -1,0 +1,177 @@
+{
+  "id": "2e7a9f60-7f85-4be8-943d-09b6b8cc3ef7",
+  "revision": 0,
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ComicEpisodePipeline",
+      "pos": [
+        360,
+        240
+      ],
+      "size": [
+        520,
+        520
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "episode_number",
+          "name": "episode_number",
+          "type": "INT",
+          "widget": {
+            "name": "episode_number"
+          },
+          "link": null
+        },
+        {
+          "label": "mode",
+          "name": "mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "label": "workspace_path",
+          "name": "workspace_path",
+          "type": "STRING",
+          "widget": {
+            "name": "workspace_path"
+          },
+          "link": null
+        },
+        {
+          "label": "comfy_url",
+          "name": "comfy_url",
+          "type": "STRING",
+          "widget": {
+            "name": "comfy_url"
+          },
+          "link": null
+        },
+        {
+          "label": "max_panels",
+          "name": "max_panels",
+          "type": "INT",
+          "widget": {
+            "name": "max_panels"
+          },
+          "link": null
+        },
+        {
+          "label": "max_batches",
+          "name": "max_batches",
+          "type": "INT",
+          "widget": {
+            "name": "max_batches"
+          },
+          "link": null
+        },
+        {
+          "label": "allow_generation",
+          "name": "allow_generation",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "allow_generation"
+          },
+          "link": null
+        },
+        {
+          "label": "timeout_seconds",
+          "name": "timeout_seconds",
+          "type": "INT",
+          "widget": {
+            "name": "timeout_seconds"
+          },
+          "link": null
+        },
+        {
+          "label": "run_label",
+          "name": "run_label",
+          "type": "STRING",
+          "widget": {
+            "name": "run_label"
+          },
+          "link": null
+        },
+        {
+          "label": "result_path",
+          "name": "result_path",
+          "type": "STRING",
+          "widget": {
+            "name": "result_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "result_json_path",
+          "name": "result_json_path",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "summary_json",
+          "name": "summary_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "label": "stdout_tail",
+          "name": "stdout_tail",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ComicEpisodePipeline"
+      },
+      "widgets_values": [
+        3,
+        "health_qa",
+        "E:\\workspace\\ComfyUIProjects",
+        "http://127.0.0.1:8188",
+        1,
+        1,
+        false,
+        1800,
+        "ui_health_test",
+        "E:\\workspace\\ComfyUIProjects\\manifests\\comfy_node_ui_health_test.json"
+      ],
+      "title": "Comic Episode Pipeline"
+    }
+  ],
+  "links": [],
+  "groups": [
+    {
+      "title": "Longform Comic Pipeline Blueprint",
+      "bounding": [
+        320,
+        180,
+        600,
+        620
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

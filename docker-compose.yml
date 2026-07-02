@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: comic-pipeline-postgres-compose
+    environment:
+      POSTGRES_DB: comic_pipeline
+      POSTGRES_USER: comic_pipeline
+      POSTGRES_PASSWORD: comic_pipeline
+    ports:
+      - "55432:5432"
+    volumes:
+      - comic-pipeline-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comic_pipeline -d comic_pipeline"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  comic-console:
+    build:
+      context: .
+    container_name: comic-pipeline-console
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      COMIC_PIPELINE_CONFIG_PATH: /app/config/.env.docker
+      COMIC_PIPELINE_DATABASE_URL: postgresql://comic_pipeline:comic_pipeline@postgres:5432/comic_pipeline
+      COMIC_PIPELINE_COMFY_URL: http://host.docker.internal:8188
+      COMIC_PIPELINE_COMFY_ROOT: /comfyui
+      COMIC_PIPELINE_COMFY_OUTPUT_ROOT: /comfyui/output
+      COMIC_PIPELINE_OUTPUT_ROOT: /comfyui/output/ComicPipeline
+      COMIC_PIPELINE_IMAGE_ENV_PATH: /app/config/image.env
+      COMIC_PIPELINE_WORKSPACE: /app
+    ports:
+      - "8199:8199"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./manifests:/app/manifests
+      - ./novels:/app/novels
+      - ./output:/app/output
+      - ./workflows:/app/workflows
+      - G:/ComfyUI:/comfyui
+    restart: unless-stopped
+
+volumes:
+  comic-pipeline-postgres-data:

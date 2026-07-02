@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>漫画流水线控制台</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260701-stitch-shell-v1">
+</head>
+<body>
+  <main class="shell">
+    <aside class="app-rail" aria-label="控制台导航">
+      <div class="rail-brand">
+        <p>COMIC PIPELINE</p>
+        <h1>漫画生产控制台</h1>
+      </div>
+
+      <section class="rail-project" aria-label="当前小说作品">
+        <p>当前小说</p>
+        <h2 id="projectMetric">读取中</h2>
+        <select id="projectSelect" class="filter-select"></select>
+        <button id="importWizardButton" class="primary" type="button" title="打开导入小说向导">导入向导</button>
+      </section>
+
+      <nav class="module-switch" aria-label="控制台模块">
+        <div class="module-group">
+          <p class="module-group-label">漫画流程</p>
+          <button data-module="home" class="active" type="button"><span>01</span>首页</button>
+          <button data-module="importNovel" type="button"><span>02</span>导入小说</button>
+          <button data-module="settingsLibrary" type="button"><span>03</span>小说设定库</button>
+          <button data-module="assets" type="button"><span>04</span>全局素材库</button>
+          <button data-module="workflow" type="button"><span>05</span>章节工作台</button>
+          <button data-module="reviewCenter" type="button"><span>06</span>审核中心</button>
+        </div>
+        <div class="module-group module-group-utility">
+          <p class="module-group-label">系统工具</p>
+          <button data-module="taskCenter" type="button"><span>•</span>任务中心</button>
+          <button data-module="settings" type="button"><span>⚙</span>设置</button>
+        </div>
+      </nav>
+
+      <section class="system-strip" aria-label="系统状态">
+        <div><span>生成后端</span><strong id="comfyMetric">-</strong></div>
+        <div><span>接口密钥</span><strong id="keyMetric">-</strong></div>
+        <div><span>输出进度</span><strong id="episodeMetric">-</strong></div>
+        <div><span>最新任务</span><strong id="jobMetric">-</strong></div>
+        <button id="refreshButton" type="button">刷新状态</button>
+      </section>
+    </aside>
+
+    <section class="workspace-frame">
+
+    <section class="home-workspace module-view active" data-module-view="home">
+      <section class="home-pane">
+        <section class="hero-panel home-hero">
+          <div>
+            <p>首页 / 控制台</p>
+            <h2>最近工作与小说项目</h2>
+            <small>首页只展示全局状态、最近工作、待处理事项和小说列表；章节生产在小说工作台中处理。</small>
+          </div>
+          <div class="hero-actions">
+            <button id="homeImportButton" class="tool-action primary" type="button" title="打开导入小说向导"><span aria-hidden="true">＋</span><strong>导入小说</strong></button>
+            <button id="homeSettingsButton" class="tool-action" type="button" title="打开全局设置"><span aria-hidden="true">⚙</span><strong>设置</strong></button>
+          </div>
+        </section>
+
+        <section id="homeStats" class="home-stats"></section>
+
+        <section class="panel home-section home-todo-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">待办队列</p>
+              <h2>现在该处理什么</h2>
+            </div>
+            <span id="homeTodoBadge" class="mini-badge">读取中</span>
+          </div>
+          <div id="homeTodos" class="todo-list"></div>
+        </section>
+
+        <section class="home-grid">
+          <section class="panel home-section">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">最近工作</p>
+                <h2>继续处理</h2>
+              </div>
+              <span id="homeRecentBadge" class="mini-badge">读取中</span>
+            </div>
+            <div id="homeRecentWork" class="home-list"></div>
+          </section>
+
+          <section class="panel home-section">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">系统状态</p>
+                <h2>运行检查</h2>
+              </div>
+              <span id="homeSystemBadge" class="mini-badge">读取中</span>
+            </div>
+            <div id="homeSystemStatus" class="home-status-list"></div>
+          </section>
+        </section>
+
+        <section class="panel home-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">小说项目</p>
+              <h2>小说列表</h2>
+            </div>
+            <span id="homeNovelBadge" class="mini-badge">读取中</span>
+          </div>
+          <div id="homeNovelList" class="novel-grid"></div>
+        </section>
+      </section>
+    </section>
+
+    <section class="import-workspace module-view" data-module-view="importNovel">
+      <section class="import-pane">
+        <section class="hero-panel">
+          <div>
+            <p>导入小说</p>
+            <h2>创建或更新小说项目</h2>
+            <small>选择小说文件、确认项目信息，然后写入 PostgreSQL；这里复用现有上传和处理接口，不新增重复导入流程。</small>
+          </div>
+          <div class="hero-actions">
+            <span id="importWizardBadge" class="mini-badge">三步导入</span>
+          </div>
+        </section>
+
+        <section class="import-wizard">
+          <section class="import-steps" aria-label="导入步骤">
+            <article>
+              <span>01 / 文件</span>
+              <strong>选择小说文本</strong>
+              <small>支持 txt、md，选择后复制到项目 novels 目录。</small>
+            </article>
+            <article>
+              <span>02 / 项目</span>
+              <strong>确认作品信息</strong>
+              <small>作品名称和项目标识用于区分多本小说。</small>
+            </article>
+            <article>
+              <span>03 / 预览</span>
+              <strong>检查章节识别</strong>
+              <small>导入前确认章节数量、样例和重复项目策略。</small>
+            </article>
+            <article>
+              <span>04 / 入库</span>
+              <strong>解析章节并建档</strong>
+              <small>生成章节索引和初始章节骨架，任务状态进入任务中心。</small>
+            </article>
+          </section>
+
+          <section class="import-form panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">输入</p>
+                <h2>小说文件与项目信息</h2>
+              </div>
+              <span id="novelFileStatus" class="mini-badge">未选择文件</span>
+            </div>
+
+            <div class="import-file-zone">
+              <label class="file-picker import-file-picker">
+                <span>选择本地小说文件</span>
+                <input id="novelFile" type="file" accept=".txt,.md,.text,.novel,text/plain,text/markdown">
+              </label>
+              <small>文件会先上传到控制台可读取目录，再回填小说文件路径。</small>
+            </div>
+
+            <div class="import-field-grid">
+              <label>作品名称<input id="projectTitle" autocomplete="off" placeholder="> 例如：搜神记"></label>
+              <label>项目标识<input id="projectSlug" autocomplete="off" placeholder="> 例如：sou_shen_ji"></label>
+              <label class="span-2">小说文件<input id="novelPath" autocomplete="off" placeholder="> 上传后自动回填，也可填写服务器可访问路径"></label>
+              <label>默认页数<input id="defaultPages" type="number" min="1" max="200"></label>
+              <label>文本编码<input id="encoding" autocomplete="off" placeholder="> utf-8"></label>
+            </div>
+
+            <div id="importPreview" class="import-preview">等待选择小说文件。</div>
+            <section id="importChapterPreview" class="import-chapter-preview">
+              <div class="import-preview-empty">选择文件后点击“预览章节”，导入前会显示章节识别结果和重复项目策略。</div>
+            </section>
+            <section id="importResultPanel" class="import-result-panel">
+              <div class="import-preview-empty">导入完成后，这里会显示章节入库、初始骨架和模型处理结果。</div>
+            </section>
+
+            <div class="import-actions">
+              <button id="previewNovelButton" type="button">预览章节</button>
+              <button id="processNovelButton" class="primary" type="button">处理 / 导入小说</button>
+              <button id="importOpenSettingsButton" type="button">打开设置</button>
+            </div>
+          </section>
+        </section>
+      </section>
+    </section>
+
+    <section class="review-workspace module-view" data-module-view="reviewCenter">
+      <section class="review-center-pane">
+        <section class="hero-panel">
+          <div>
+            <p id="reviewScopeMetric">审核中心</p>
+            <h2>待处理审核队列</h2>
+            <small>统一查看生成结果、拆解、设定、素材和任务诊断；具体审核仍跳转到原有工作区处理。</small>
+          </div>
+          <div class="hero-actions">
+            <span id="reviewCenterBadge" class="mini-badge">读取中</span>
+            <button id="reviewCenterRefreshButton" class="tool-action" type="button" title="刷新审核队列" aria-label="刷新审核队列"><span aria-hidden="true">↻</span><strong>刷新审核</strong></button>
+          </div>
+        </section>
+        <section id="reviewCenterSummary" class="review-summary-grid"></section>
+        <section class="review-center-layout">
+          <section class="panel review-queue-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">审核队列</p>
+                <h2>按优先级处理</h2>
+              </div>
+              <select id="reviewCenterFilter" class="filter-select">
+                <option value="all">全部类型</option>
+                <option value="output">生成结果</option>
+                <option value="breakdown">章节拆解</option>
+                <option value="setting">小说设定</option>
+                <option value="asset">视觉素材</option>
+                <option value="job">任务诊断</option>
+              </select>
+            </div>
+            <div id="reviewCenterList" class="review-center-list"></div>
+          </section>
+          <section class="panel review-guide-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">审核对象</p>
+                <h2>详情与历史</h2>
+              </div>
+            </div>
+            <div id="reviewObjectDetail" class="review-object-detail"></div>
+            <div class="review-object-head">
+              <div>
+                <p class="eyebrow">对象聚合</p>
+                <h2>按对象查看历史</h2>
+              </div>
+              <span id="reviewObjectGroupBadge" class="mini-badge">0 组</span>
+            </div>
+            <div id="reviewObjectGroups" class="review-object-groups"></div>
+            <div class="review-timeline-head">
+              <div>
+                <p class="eyebrow">审核时间线</p>
+                <h2>最近处理记录</h2>
+              </div>
+              <span id="reviewTimelineBadge" class="mini-badge">0 条</span>
+            </div>
+            <div class="review-timeline-tools">
+              <select id="reviewTimelineFilter" class="filter-select" aria-label="筛选审核时间线">
+                <option value="all">全部记录</option>
+                <option value="generated_output">生成结果</option>
+                <option value="chapter_breakdown">章节拆解</option>
+                <option value="setting">小说设定</option>
+                <option value="setting_scan">设定扫描</option>
+                <option value="visual_asset">视觉素材</option>
+              </select>
+              <select id="reviewTimelineRange" class="filter-select" aria-label="审核时间范围">
+                <option value="all">全部时间</option>
+                <option value="7d">最近 7 天</option>
+                <option value="30d">最近 30 天</option>
+                <option value="90d">最近 90 天</option>
+              </select>
+              <select id="reviewTimelineLimit" class="filter-select" aria-label="审核时间线记录数量">
+                <option value="40">最近 40 条</option>
+                <option value="20">最近 20 条</option>
+                <option value="80">最近 80 条</option>
+                <option value="100">最近 100 条</option>
+              </select>
+            </div>
+            <div id="reviewReasonStats" class="review-reason-stats"></div>
+            <div id="reviewTimelineList" class="review-timeline-list"></div>
+            <div id="reviewTimelineDetail" class="review-timeline-detail"></div>
+          </section>
+        </section>
+      </section>
+    </section>
+
+    <section class="task-workspace module-view" data-module-view="taskCenter">
+      <section class="task-center-pane">
+        <section class="hero-panel">
+          <div>
+            <p>任务中心</p>
+            <h2>生成、拆解与诊断任务</h2>
+            <small>集中查看任务状态、日志尾部和可重试诊断；任务执行仍由现有流程入口触发。</small>
+          </div>
+          <div class="hero-actions">
+            <span id="taskCenterBadge" class="mini-badge">读取中</span>
+            <button id="taskCenterRefreshButton" class="tool-action" type="button" title="刷新任务列表" aria-label="刷新任务列表"><span aria-hidden="true">↻</span><strong>刷新任务</strong></button>
+          </div>
+        </section>
+        <section id="taskCenterSummary" class="task-summary-grid"></section>
+        <section class="task-center-layout">
+          <section class="panel task-center-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">任务列表</p>
+                <h2>最近任务</h2>
+              </div>
+              <select id="taskCenterFilter" class="filter-select">
+                <option value="all">全部任务</option>
+                <option value="running">运行中</option>
+                <option value="waiting">等待处理</option>
+                <option value="failed">失败任务</option>
+                <option value="passed">已完成</option>
+              </select>
+            </div>
+            <div id="taskCenterJobs" class="jobs"></div>
+          </section>
+          <section class="panel task-detail-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">任务详情</p>
+                <h2>选中任务</h2>
+              </div>
+              <span id="taskDetailBadge" class="mini-badge">未选择</span>
+            </div>
+            <div id="taskDetail" class="task-detail-empty">选择左侧任务查看详情。</div>
+          </section>
+        </section>
+      </section>
+    </section>
+
+    <section class="workbench module-view" data-module-view="workflow">
+    <aside class="sidebar">
+      <div class="side-head">
+        <div>
+          <h2>当前小说章节</h2>
+          <p id="seriesMetric">读取中</p>
+        </div>
+        <span id="healthBadge" class="badge">检查中</span>
+      </div>
+      <input id="episodeSearch" class="search" placeholder="搜索章节/卷名">
+      <select id="episodeFilter" class="filter-select">
+        <option value="all">全部章节</option>
+        <option value="generated">已生成</option>
+        <option value="draft_ready">有拆解</option>
+        <option value="not_started">未开始</option>
+      </select>
+      <p id="episodeCount" class="count-line">-</p>
+      <div id="episodeList" class="episode-list"></div>
+    </aside>
+
+    <section class="main-pane">
+      <section class="hero-panel">
+        <div>
+          <p id="statusLine">读取中</p>
+          <h2>小说详情</h2>
+          <small id="contextLine">章节由左侧列表选择，当前视图跟随所选章节刷新。</small>
+        </div>
+        <div class="hero-actions">
+          <button id="agentFocusButton" class="tool-action" type="button" title="查看流程助手建议" aria-label="查看流程助手建议"><span aria-hidden="true">></span><strong>流程助手</strong></button>
+        </div>
+      </section>
+
+      <section id="workflowSteps" class="workflow-steps"></section>
+
+      <details class="panel reader-panel collapsible-panel" open>
+        <summary class="section-head">
+          <div>
+            <p class="eyebrow">章节阅读器</p>
+            <h2 id="readerTitle">读取中</h2>
+          </div>
+          <span id="readerBadge" class="mini-badge">待加载</span>
+        </summary>
+        <div id="readerSummary" class="reader-summary"></div>
+        <section class="reader-grid">
+          <article>
+            <div class="reader-column-head">
+              <span>原小说</span>
+              <button id="readerSourceTabButton" type="button">查看全文</button>
+            </div>
+            <pre id="readerSourcePreview" class="reader-source-preview">暂无原文</pre>
+          </article>
+          <article>
+            <div class="reader-column-head">
+              <span>智能拆解</span>
+              <button id="readerBreakdownTabButton" type="button">查看拆解</button>
+            </div>
+            <div id="readerBreakdownPreview" class="reader-breakdown-preview"></div>
+          </article>
+        </section>
+        <section class="breakdown-review-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">拆解审核</p>
+              <h2>人工备注与审核</h2>
+            </div>
+            <span id="breakdownReviewBadge" class="mini-badge">待同步</span>
+          </div>
+          <label>审核备注<textarea id="breakdownEditorNote" rows="3" placeholder="记录拆解需要调整的问题、确认结论或下一步处理意见"></textarea></label>
+          <div id="closeReadingSummary" class="close-reading-summary"></div>
+          <div class="editor-actions">
+            <button id="closeReadingButton" type="button" title="基于章节原文重新细读未生成页面，并更新页面/分镜提示词">细读拆解</button>
+            <button id="breakdownSaveNoteButton" type="button">保存备注</button>
+            <button id="breakdownApproveButton" class="primary" type="button">拆解通过</button>
+            <button id="breakdownNeedsWorkButton" type="button">标记待改</button>
+          </div>
+        </section>
+      </details>
+
+      <nav class="tabs" aria-label="工作台视图">
+        <button data-tab="source" class="active" type="button">原文对照</button>
+        <button data-tab="breakdown" type="button">章节拆解</button>
+        <button data-tab="storyline" type="button">故事线</button>
+        <button data-tab="media" type="button">生成结果</button>
+        <button data-tab="qa" type="button">质检审核</button>
+        <button data-tab="jobs" type="button">任务日志</button>
+      </nav>
+
+      <section id="tab-breakdown" class="tab-view">
+        <div id="breakdownView" class="page-list"></div>
+      </section>
+
+      <section id="tab-source" class="tab-view active">
+        <div id="sourceView" class="source-reader"></div>
+      </section>
+
+      <section id="tab-storyline" class="tab-view">
+        <div id="storylineView" class="timeline"></div>
+      </section>
+
+      <section id="tab-media" class="tab-view">
+        <div class="media-toolbar">
+          <button data-media-filter="pages" class="active" type="button">页面</button>
+          <button data-media-filter="panels" type="button">分镜</button>
+          <button id="outputSyncButton" class="tool-action" type="button" title="将当前章节已生成的页面和分镜写入数据库"><span aria-hidden="true">⇄</span><strong>同步结果入库</strong></button>
+          <button data-output-batch="approve" class="tool-action" type="button" title="审核通过当前筛选中已入库的生成结果"><span aria-hidden="true">✓</span><strong>批量通过</strong></button>
+          <button data-output-batch="needs_work" class="tool-action" type="button" title="标记当前筛选中已入库的生成结果待修改"><span aria-hidden="true">?</span><strong>批量待改</strong></button>
+          <button data-output-batch="pending" class="tool-action" type="button" title="将当前筛选中已入库的生成结果退回待审"><span aria-hidden="true">↺</span><strong>批量待审</strong></button>
+          <span id="outputDbBadge" class="mini-badge">待同步</span>
+        </div>
+        <div id="mediaView" class="media-grid"></div>
+      </section>
+
+      <section id="tab-qa" class="tab-view">
+        <div class="qa-tabs">
+          <button data-qa-tab="draft_review_md" class="active" type="button">拆解审稿</button>
+          <button data-qa-tab="draft_qa_md" type="button">草稿质检</button>
+          <button data-qa-tab="status_md" type="button">状态</button>
+          <button data-qa-tab="lettering_qa_md" type="button">文字质检</button>
+          <button data-qa-tab="consistency_qa_md" type="button">一致性</button>
+          <button data-qa-tab="image_health_qa_md" type="button">图片健康</button>
+        </div>
+        <pre id="textOutput">暂无内容</pre>
+      </section>
+
+      <section id="tab-jobs" class="tab-view">
+        <div id="jobs" class="jobs"></div>
+      </section>
+    </section>
+
+    <aside class="inspector">
+      <section class="panel agent-compact" id="agentCompact">
+        <div>
+          <p class="eyebrow">当前建议</p>
+          <strong id="agentCompactTitle">读取中</strong>
+          <small id="agentCompactDetail">正在检查流程状态。</small>
+        </div>
+        <button id="agentCompactButton" class="primary" type="button">执行建议</button>
+      </section>
+
+      <details class="panel agent-panel collapsible-panel is-secondary-hidden" id="agentPanel">
+        <summary class="section-head">
+          <div>
+            <p class="eyebrow">流程助手</p>
+            <h2>当前建议</h2>
+          </div>
+          <span id="agentStateBadge" class="mini-badge">检查中</span>
+        </summary>
+        <div class="agent-summary">
+          <strong id="agentTitle">读取中</strong>
+          <p id="agentDetail">正在检查当前章节状态。</p>
+        </div>
+        <div class="agent-metrics" id="agentMetrics"></div>
+        <div class="approval-gates" id="approvalGates"></div>
+        <div class="agent-simulation" id="agentSimulation"></div>
+        <div class="agent-actions">
+          <button id="agentPrimaryButton" class="primary" type="button">执行建议</button>
+          <a id="agentPreviewLink" href="#" target="_blank" rel="noreferrer">打开预览</a>
+          <button id="agentRefreshButton" type="button">重新检查</button>
+        </div>
+        <details class="agent-checks">
+          <summary>诊断详情</summary>
+          <div id="agentChecks"></div>
+        </details>
+      </details>
+
+      <details class="panel manual-run-panel collapsible-panel">
+        <summary class="section-head">
+          <div>
+            <p class="eyebrow">辅助操作</p>
+            <h2>手动执行</h2>
+          </div>
+          <span id="runEpisodeLabel" class="mini-badge">EP-</span>
+        </summary>
+        <div class="run-options">
+          <label>页数<input id="pages" type="number" min="1" value="8"></label>
+          <label>最大分镜<input id="maxPanels" type="number" min="1" value="1"></label>
+          <label>最大页数<input id="maxPages" type="number" min="1" value="1"></label>
+        </div>
+        <div class="toggles">
+          <label><input id="dryRun" type="checkbox"> 安全演练</label>
+          <label><input id="forceRun" type="checkbox"> 强制重跑</label>
+          <label><input id="allowWarnings" type="checkbox" checked> 允许草稿警告</label>
+        </div>
+        <div class="stage-actions">
+          <button data-stage="preflight" type="button">预检</button>
+          <button data-stage="breakdown" type="button">章节骨架</button>
+          <button data-stage="close_reading" type="button">细读拆解</button>
+          <button data-stage="draft_review" type="button">生成审稿包</button>
+          <button data-stage="generate" class="primary" type="button">小批量生成</button>
+          <button data-stage="review" type="button">页面审核</button>
+          <button data-stage="status" type="button">刷新状态</button>
+        </div>
+      </details>
+
+    </aside>
+    </section>
+
+    <section class="setting-workspace module-view" data-module-view="settingsLibrary">
+      <section class="setting-library-pane">
+        <section class="hero-panel">
+          <div>
+            <p id="settingScopeMetric">小说设定库</p>
+            <h2>角色、场景、规则与画风</h2>
+            <small id="settingContextLine">全书扫描生成待审核设定，审核和锁定后供后续章节生成复用。</small>
+          </div>
+          <div class="hero-actions">
+            <select id="settingScanExtractionMode" class="filter-select compact-select" title="全书扫描模式">
+              <option value="script">脚本扫描</option>
+              <option value="ai">AI 增强</option>
+            </select>
+            <button id="settingScanButton" class="tool-action primary" type="button" title="预览影响范围并二次确认后启动全书设定扫描"><span aria-hidden="true">＋</span><strong>全书扫描</strong></button>
+            <button id="settingRefreshButton" class="tool-action" type="button" title="刷新设定库"><span aria-hidden="true">↻</span><strong>刷新</strong></button>
+          </div>
+        </section>
+
+        <section class="setting-layout">
+          <section class="setting-list-panel">
+            <section class="setting-toolbar" aria-label="设定筛选">
+              <input id="settingSearch" class="search" placeholder="搜索名称/描述/提示词">
+              <select id="settingTypeFilter" class="filter-select">
+                <option value="all">全部类型</option>
+                <option value="character">角色</option>
+                <option value="location">场景</option>
+                <option value="prop">道具/武器</option>
+                <option value="faction">组织/阵营</option>
+                <option value="world_rule">世界观</option>
+                <option value="style_rule">画风规范</option>
+              </select>
+              <select id="settingStatusFilter" class="filter-select">
+                <option value="all">全部状态</option>
+                <option value="pending_review">待审核</option>
+                <option value="approved">已通过</option>
+                <option value="needs_work">待修改</option>
+                <option value="rejected">已退回</option>
+              </select>
+            </section>
+            <div id="settingSummary" class="setting-summary"></div>
+            <div id="settingList" class="setting-list"></div>
+          </section>
+
+          <section class="setting-editor panel">
+            <section class="setting-suggest-panel" aria-label="新增设定扫描">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">新增设定</p>
+                  <h2>按说明扫描全文</h2>
+                </div>
+                <span id="settingSuggestBadge" class="mini-badge">待输入</span>
+              </div>
+              <label>说明<textarea id="settingSuggestInstruction" rows="3" placeholder="例如：补充主角拓拔野的角色设定，提取出现章节、身份关系和视觉特征"></textarea></label>
+              <div class="setting-suggest-actions">
+                <button id="settingSuggestButton" class="primary" type="button">扫描候选</button>
+                <button id="settingSuggestClearButton" type="button">清空候选</button>
+              </div>
+              <div id="settingSuggestResults" class="setting-suggest-results"></div>
+            </section>
+
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">人工审核</p>
+                <h2 id="settingEditorTitle">新增设定</h2>
+              </div>
+              <span id="settingEditorBadge" class="mini-badge">待编辑</span>
+            </div>
+            <input id="settingId" type="hidden">
+            <label>类型
+              <select id="settingItemType" class="filter-select">
+                <option value="character">角色</option>
+                <option value="location">场景</option>
+                <option value="prop">道具/武器</option>
+                <option value="faction">组织/阵营</option>
+                <option value="world_rule">世界观</option>
+                <option value="style_rule">画风规范</option>
+              </select>
+            </label>
+            <label>名称<input id="settingName" autocomplete="off"></label>
+            <label>别名<input id="settingAliases" autocomplete="off" placeholder="多个别名用逗号分隔"></label>
+            <label>首次出现章节<input id="settingFirstChapter" type="number" min="1"></label>
+            <label>出现章节<input id="settingChapters" autocomplete="off" placeholder="例如 1, 2, 8"></label>
+            <label>描述<textarea id="settingDescription" rows="5"></textarea></label>
+            <label>视觉提示词<textarea id="settingVisualPrompt" rows="4"></textarea></label>
+            <label>负面提示词<textarea id="settingNegativePrompt" rows="3"></textarea></label>
+            <section class="setting-refresh-panel">
+              <div class="setting-refresh-head">
+                <div>
+                  <span>单项重提</span>
+                  <strong>重新提取当前设定提示词</strong>
+                </div>
+                <div class="setting-refresh-controls">
+                  <select id="settingRefreshExtractionMode" class="filter-select">
+                    <option value="script">脚本提取</option>
+                    <option value="ai">AI 增强</option>
+                  </select>
+                  <select id="settingRefreshMode" class="filter-select">
+                    <option value="fill_missing">仅补空字段</option>
+                    <option value="overwrite">覆盖编辑器</option>
+                  </select>
+                </div>
+              </div>
+              <div class="setting-refresh-actions">
+                <button id="settingRefreshPromptButton" type="button">重提提示词</button>
+                <button id="settingApplyRefreshButton" type="button" disabled>应用到编辑器</button>
+              </div>
+              <div id="settingRefreshResult" class="setting-refresh-result"></div>
+            </section>
+            <div class="setting-editor-actions">
+              <button id="settingNewButton" type="button">清空新增</button>
+              <button id="settingSaveButton" class="primary" type="button">保存设定</button>
+              <button id="settingApproveButton" type="button">审核通过</button>
+              <button id="settingNeedsWorkButton" type="button">标记待改</button>
+              <button id="settingLockButton" type="button">锁定设定</button>
+            </div>
+          </section>
+        </section>
+      </section>
+    </section>
+
+    <section class="asset-workspace module-view" data-module-view="assets">
+      <section class="asset-library-pane">
+        <section class="hero-panel">
+          <div>
+            <p id="assetScopeMetric">全局素材库</p>
+            <h2>角色、场景、异兽资产</h2>
+            <small id="assetContextLine">素材跨章节复用，当前章节只作为使用标记。</small>
+          </div>
+          <div class="hero-actions">
+            <span id="assetDbBadge" class="mini-badge">待同步</span>
+            <button id="assetSyncButton" class="tool-action primary" type="button" title="将扫描到的素材写入数据库" aria-label="同步素材入库"><span aria-hidden="true">⇄</span><strong>同步入库</strong></button>
+            <button id="assetRefreshButton" class="tool-action" type="button" title="刷新素材库" aria-label="刷新素材库"><span aria-hidden="true">↻</span><strong>刷新素材</strong></button>
+          </div>
+        </section>
+        <section class="asset-toolbar" aria-label="素材筛选">
+          <input id="assetSearch" class="search" placeholder="搜索素材/章节/路径">
+          <select id="assetUsageFilter" class="filter-select">
+            <option value="all">全部素材</option>
+            <option value="current">当前章使用</option>
+            <option value="unused-current">当前章未使用</option>
+            <option value="missing">缺失文件</option>
+          </select>
+          <div id="assetCategoryFilters" class="asset-category-filters"></div>
+        </section>
+        <div id="assetView" class="asset-board"></div>
+      </section>
+    </section>
+
+    <section class="settings-workspace module-view" data-module-view="settings">
+      <section class="settings-pane">
+        <section class="hero-panel">
+          <div>
+            <p>全局设置</p>
+            <h2>运行配置</h2>
+            <small>统一管理控制台、生成后端、模型接口和数据库连接；密钥只写入本地配置，不显示明文。</small>
+          </div>
+          <div class="hero-actions">
+            <button id="checkSettingsButton" class="tool-action" type="button" title="检查配置连接" aria-label="检查配置连接"><span aria-hidden="true">↻</span><strong>连接测试</strong></button>
+            <button id="saveConfigButton" class="tool-action" type="button" title="保存设置" aria-label="保存设置"><span aria-hidden="true">✓</span><strong>保存设置</strong></button>
+          </div>
+        </section>
+
+        <section class="settings-overview">
+          <section class="panel settings-source-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">配置来源</p>
+                <h2>写入位置与职责</h2>
+              </div>
+            </div>
+            <div id="settingsSourceList" class="settings-source-list"></div>
+          </section>
+
+          <section class="panel settings-health-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">连接测试</p>
+                <h2>当前配置状态</h2>
+              </div>
+              <span id="settingsHealthBadge" class="mini-badge">未测试</span>
+            </div>
+            <div id="settingsHealthList" class="settings-health-list">
+              <div class="settings-empty">点击“连接测试”检查 PostgreSQL、ComfyUI、API Key、输出目录和模型配置。</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="settings-grid">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">ComfyUI</p>
+                <h2>生成后端</h2>
+              </div>
+              <span id="settingsBackendBadge" class="mini-badge">待检查</span>
+            </div>
+            <label>生成后端地址<input id="comfyUrl" autocomplete="off"></label>
+            <label>生成后端根目录<input id="comfyRoot" autocomplete="off"></label>
+            <label>输出目录<input id="outputRoot" autocomplete="off"></label>
+            <div class="backend-actions">
+              <button id="checkBackendButton" type="button">检查后端</button>
+              <button id="startBackendButton" class="primary" type="button">启动后端</button>
+            </div>
+            <div id="backendDiagnostics" class="backend-diagnostics">尚未检查生成后端。</div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">文本模型</p>
+                <h2>小说处理</h2>
+              </div>
+              <span id="settingsTextKeyBadge" class="mini-badge">未配置</span>
+            </div>
+            <label>小说处理模型<input id="textModel" autocomplete="off"></label>
+            <small class="settings-note">用于小说导入增强、章节细读、全书设定扫描和提示词整理。</small>
+            <label>长文本超时秒数<input id="textModelTimeout" type="number" min="30" step="30" autocomplete="off"></label>
+            <label class="settings-toggle">
+              <input id="textModelStream" type="checkbox">
+              <span>启用流式响应</span>
+            </label>
+            <small class="settings-note">长小说处理建议 300 秒以上；流式响应可以减少模型生成期间的读取超时。</small>
+            <label>小说处理接口地址<input id="textBaseUrl" autocomplete="off"></label>
+            <label>小说处理 API Key<input id="textApiKey" type="password" placeholder="留空表示不修改"></label>
+            <small id="textApiKeyDetail" class="settings-note">密钥保存在 text.env，页面只显示是否已配置。</small>
+            <button id="testTextModelButton" type="button">测试小说处理模型</button>
+            <div id="textModelTestResult" class="model-test-result">尚未测试小说处理模型。</div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">图片模型</p>
+                <h2>图片生成</h2>
+              </div>
+              <span id="settingsImageKeyBadge" class="mini-badge">未配置</span>
+            </div>
+            <label>图片生成模型<input id="imageModel" autocomplete="off"></label>
+            <small class="settings-note">用于 ComfyUI 图片生成节点，不与小说处理模型混用。</small>
+            <label>图片生成接口地址<input id="imageBaseUrl" autocomplete="off"></label>
+            <label>图片生成 API Key<input id="imageApiKey" type="password" placeholder="留空表示不修改"></label>
+            <small id="imageApiKeyDetail" class="settings-note">密钥保存在 image.env，页面只显示是否已配置。</small>
+            <button id="testImageModelButton" type="button">测试图片生成模型</button>
+            <div id="imageModelTestResult" class="model-test-result">尚未测试图片生成模型。</div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">PostgreSQL</p>
+                <h2>数据库</h2>
+              </div>
+              <span id="settingsDatabaseBadge" class="mini-badge">待检查</span>
+            </div>
+            <label>PostgreSQL 地址<input id="databaseUrl" autocomplete="off"></label>
+            <small id="databaseDetail" class="settings-note">作品、章节、审核状态和任务索引使用 PostgreSQL 保存。</small>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">生效配置</p>
+                <h2>当前小说</h2>
+              </div>
+            </div>
+            <div id="effectiveProjectConfig" class="effective-config">
+              当前小说使用全局配置。
+            </div>
+          </section>
+
+        </section>
+      </section>
+    </section>
+    </section>
+  </main>
+
+  <div id="appToastStack" class="app-toast-stack" aria-live="polite" aria-atomic="true"></div>
+  <div id="appDialog" class="app-dialog-overlay hidden" role="presentation">
+    <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogMessage">
+      <div class="app-dialog-head">
+        <span id="appDialogKind" class="app-dialog-kind">提示</span>
+        <h2 id="appDialogTitle">确认操作</h2>
+      </div>
+      <p id="appDialogMessage"></p>
+      <input id="appDialogInput" class="hidden" autocomplete="off">
+      <div class="app-dialog-actions">
+        <button id="appDialogCancel" type="button">取消</button>
+        <button id="appDialogConfirm" class="primary" type="button">确认</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js?v=20260702-setting-scan-ai-v1"></script>
+</body>
+</html>

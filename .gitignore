@@ -1,0 +1,39 @@
+# Local machine config and credentials
+config/.env
+config/.env.*
+!config/.env.example
+!config/.env.docker.example
+config/text.env
+config/image.env
+config/*.local
+
+# Runtime data
+novels/
+output/
+logs/
+backups/
+tmp/
+test-results/
+.playwright-cli/
+.pytest_cache/
+docs/superpowers/
+
+# Generated project manifests and panel workflows
+manifests/projects/
+manifests/*_check.json
+workflows/comic/ssj_*.json
+workflows/comic/ssj-*.json
+workflows/comic/*_fallback_v*.json
+workflows/comic/*_image_v*.json
+workflows/comic/*.bak-*
+custom_nodes/comic_episode_pipeline_web.disabled/comic_previews/
+custom_nodes/comic_episode_pipeline_web.disabled/*.bak-*
+
+# Python / frontend caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+node_modules/
+dist/
+build/
