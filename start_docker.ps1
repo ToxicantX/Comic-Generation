@@ -1,6 +1,9 @@
 param(
     [switch]$Build,
-    [switch]$SkipHealthCheck
+    [switch]$SkipHealthCheck,
+    [switch]$SkipGenerationBackend,
+    [string]$ComfyRoot = "G:\ComfyUI",
+    [string]$ComfyUrl = "http://127.0.0.1:8188"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +43,62 @@ function Test-PortListening {
     return @($connections).Count -gt 0
 }
 
+function Test-HttpReady {
+    param([string]$Url)
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+        return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500
+    } catch {
+        return $false
+    }
+}
+
+function Start-GenerationBackend {
+    if ($SkipGenerationBackend) {
+        Write-Host "Generation backend autostart skipped."
+        return
+    }
+    if (Test-HttpReady -Url $ComfyUrl) {
+        Write-Host "Generation backend already running: $ComfyUrl"
+        return
+    }
+
+    $mainPy = Join-Path $ComfyRoot "main.py"
+    if (-not (Test-Path -LiteralPath $mainPy)) {
+        Write-Warning "Generation backend entry not found: $mainPy"
+        return
+    }
+    $pythonExe = Join-Path $ComfyRoot "venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        $pythonExe = "python"
+    }
+
+    $logDir = Join-Path $root "logs"
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $stdout = Join-Path $logDir "generation-backend.out.log"
+    $stderr = Join-Path $logDir "generation-backend.err.log"
+    $backendPort = ([Uri]$ComfyUrl).Port
+
+    Write-Host "Starting generation backend: $ComfyUrl"
+    Start-Process `
+        -FilePath $pythonExe `
+        -ArgumentList @($mainPy, "--listen", "0.0.0.0", "--port", [string]$backendPort) `
+        -WorkingDirectory $ComfyRoot `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError $stderr `
+        -WindowStyle Hidden | Out-Null
+
+    $deadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        if (Test-HttpReady -Url $ComfyUrl) {
+            Write-Host "Generation backend ready: $ComfyUrl"
+            return
+        }
+    }
+    Write-Warning "Generation backend did not respond within 90 seconds. Logs: $stdout / $stderr"
+}
+
 Set-Location $root
 Test-Docker
 
@@ -58,9 +117,7 @@ Copy-ExampleIfMissing `
     -TargetPath (Join-Path $root "config\image.env") `
     -Label "Image API config"
 
-if (-not (Test-Path -LiteralPath "G:\ComfyUI")) {
-    Write-Warning "G:\ComfyUI was not found. Edit docker-compose.yml volume mapping and config\.env.docker before generating images."
-}
+Start-GenerationBackend
 
 $existingConsole = docker ps --format "{{.Names}}" | Where-Object { $_ -eq "comic-pipeline-console" }
 if (-not $existingConsole -and (Test-PortListening -Port 8199)) {
@@ -80,7 +137,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "Console URL: http://127.0.0.1:8199"
 Write-Host "PostgreSQL URL from host: postgresql://comic_pipeline:comic_pipeline@127.0.0.1:55432/comic_pipeline"
-Write-Host "ComfyUI backend expected at: http://127.0.0.1:8188"
+Write-Host "ComfyUI backend expected at: $ComfyUrl"
 Write-Host ""
 
 if (-not $SkipHealthCheck) {

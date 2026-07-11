@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -964,15 +965,28 @@ def asset_image_size(category: str) -> str:
     return "1024x1536"
 
 
-def create_asset_workflow(alias: str, category: str, target_path: str | Path, reference_path: str = "") -> Path:
+def create_asset_workflow(
+    alias: str,
+    category: str,
+    target_path: str | Path,
+    reference_path: str = "",
+    approved_prompt: str = "",
+    approved_negative_prompt: str = "",
+) -> Path:
     config = config_snapshot()["config"]
     GENERATED_ASSET_WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
     workflow_path = GENERATED_ASSET_WORKFLOW_DIR / f"{safe_stem(alias)}_asset_regenerate_v001.json"
+    prompt = asset_prompt(alias, category, bool(reference_path))
+    if approved_prompt.strip():
+        prompt += f"\n\nApproved novel setting (must follow):\n{approved_prompt.strip()}"
+    negative_prompt = ASSET_NEGATIVE_PROMPT
+    if approved_negative_prompt.strip():
+        negative_prompt += f", {approved_negative_prompt.strip()}"
     inputs = {
-        "prompt": asset_prompt(alias, category, bool(reference_path)),
+        "prompt": prompt,
         "model": config.get("COMIC_PIPELINE_IMAGE_MODEL", DEFAULTS["COMIC_PIPELINE_IMAGE_MODEL"]),
         "size": asset_image_size(category),
-        "negative_prompt": ASSET_NEGATIVE_PROMPT,
+        "negative_prompt": negative_prompt,
         "api_key_env_path": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or str(IMAGE_ENV_PATH),
     }
     if reference_path:
@@ -1856,6 +1870,7 @@ def generation_context_prompt_block(context_snapshot: dict) -> str:
         return ""
     settings = context_snapshot.get("settings") if isinstance(context_snapshot.get("settings"), list) else []
     assets = context_snapshot.get("assets") if isinstance(context_snapshot.get("assets"), list) else []
+    review_feedback = compact_text(context_snapshot.get("review_feedback", ""), 500)
     lines = []
     if settings:
         lines.append("已审核小说设定（必须保持一致）：")
@@ -1874,6 +1889,9 @@ def generation_context_prompt_block(context_snapshot: dict) -> str:
             locked = "，已锁定" if item.get("locked") else ""
             path_note = "已有参考图" if item.get("file_path") else "暂无参考图路径"
             lines.append(f"- {asset_type}：{title}{locked}，{path_note}。")
+    if review_feedback:
+        lines.append("本次重生成审核反馈（必须针对性修正）：")
+        lines.append(f"- {review_feedback}")
     if not lines:
         return ""
     return "\n\n[生成上下文]\n" + "\n".join(lines) + "\n[/生成上下文]"
@@ -2412,6 +2430,10 @@ def review_output_api(output_id: int, payload: dict) -> dict:
         raise ValueError("生成结果不存在")
     action = str(payload.get("action") or "approve").strip()
     comment = str(payload.get("comment") or "").strip()
+    if action not in {"approve", "reject", "needs_work", "pending"}:
+        raise ValueError("不支持的生成结果审核动作")
+    if action in {"reject", "needs_work"} and not comment:
+        raise ValueError("标记待改或拒绝时必须填写具体问题")
     status = {
         "approve": "approved",
         "reject": "rejected",
@@ -2419,6 +2441,8 @@ def review_output_api(output_id: int, payload: dict) -> dict:
         "pending": "pending_review",
     }.get(action, action)
     quality_checks, quality_summary = clean_output_quality_checks(payload.get("quality_checks"))
+    if action == "approve" and (quality_summary["failed"] or quality_summary["unknown"]):
+        raise ValueError("审核通过前必须确认全部质量检查项")
     saved = db.update_generated_output(database_url(), output_id, {
         "review_status": status,
         "metadata": {
@@ -3066,6 +3090,11 @@ def episode_pages_from_plan(project: dict, episode_number: int, plan: dict, medi
                     "caption": panel.get("caption", ""),
                     "dialogue": panel.get("dialogue", []),
                     "prompt": panel.get("prompt", panel.get("fallback_prompt", "")),
+                    "panel_role": panel.get("panel_role", ""),
+                    "shot_type": panel.get("shot_type", ""),
+                    "visual_priority": panel.get("visual_priority", ""),
+                    "camera_direction": panel.get("camera_direction", ""),
+                    "close_reading_refined": bool(panel.get("close_reading_refined")),
                     "layout": panel.get("layout", {}),
                     "media": media_by_panel.get(panel_id, {}),
                     "workflow_path": str(workflow_path_for_panel(panel_id) or ""),
@@ -3080,6 +3109,13 @@ def episode_pages_from_plan(project: dict, episode_number: int, plan: dict, medi
                 "summary": page.get("summary", ""),
                 "source_excerpt": page.get("source_excerpt", ""),
                 "panel_intent": page.get("panel_intent", []),
+                "director": page.get("director", {}),
+                "layout_style": page.get("layout_style", ""),
+                "reading_flow": page.get("reading_flow", ""),
+                "visual_priority": page.get("visual_priority", ""),
+                "close_reading_required": bool(page.get("close_reading_required")),
+                "close_reading_refined": bool(page.get("close_reading_refined")),
+                "close_reading_updated": page.get("close_reading_updated", ""),
                 "plan_path": page.get("plan", str(plan_path_for_page(page_id))),
                 "media": media_by_page.get(page_id, {}),
                 "panels": panels,
@@ -3326,6 +3362,24 @@ def media_progress(detail: dict) -> dict:
     }
 
 
+def page_requires_close_reading(page: dict) -> bool:
+    status = str(page.get("status") or "").lower()
+    if "skeleton" in status or page.get("close_reading_required"):
+        return True
+    summary = str(page.get("summary") or "")
+    if "初始页面骨架" in summary or "待细读" in summary:
+        return True
+    for panel in page.get("panels") or []:
+        text = f"{panel.get('title') or ''} {panel.get('prompt') or ''}"
+        if "待细读" in text:
+            return True
+    return False
+
+
+def pending_close_reading_pages(detail: dict) -> list[dict]:
+    return [page for page in detail.get("pages", []) if page_requires_close_reading(page)]
+
+
 def generated_output_quality_status(project: dict, episode_number: int) -> dict:
     rows = db.list_generated_outputs(database_url(), project["slug"], episode_number)
     approved_rows = [row for row in rows if row.get("review_status") == "approved"]
@@ -3409,6 +3463,7 @@ def global_asset_readiness(project: dict) -> dict:
 
 def approval_gate_states(health: dict, detail: dict, status: dict, approvals: dict) -> list[dict]:
     pages = detail.get("pages", [])
+    pending_close_reading = pending_close_reading_pages(detail)
     assets = detail.get("assets", {})
     asset_total = int(assets.get("total_assets") or 0)
     media = media_progress(detail)
@@ -3428,6 +3483,10 @@ def approval_gate_states(health: dict, detail: dict, status: dict, approvals: di
 
     if not pages:
         breakdown = ("ready", "可拆解", "选择小说与章节后，先生成页面摘要、分镜提示和审稿包。")
+    elif pending_close_reading and not global_ready["ok"]:
+        breakdown = ("locked", "等待全局素材", global_ready["message"] or "全局设定和素材确认后才能执行章节细读。")
+    elif pending_close_reading:
+        breakdown = ("ready", "可细读", f"还有 {len(pending_close_reading)} 个骨架页面需要细读，完成后才能审核拆解。")
     elif approvals.get("draft"):
         breakdown = ("done", "已通过", "拆解结果已人工确认。")
     else:
@@ -3496,6 +3555,8 @@ def assert_approval_allowed(episode_number: int, gate: str, approvals: dict) -> 
     media = media_progress(detail)
     if gate == "draft" and not detail.get("pages"):
         raise ValueError("请先完成 AI 拆解，再通过拆解审核。")
+    if gate == "draft" and pending_close_reading_pages(detail):
+        raise ValueError("当前章节仍有骨架页面，请先完成细读拆解，再通过拆解审核。")
     if gate == "assets":
         readiness = global_asset_readiness(active_project())
         if not readiness["ok"]:
@@ -3670,6 +3731,17 @@ def agent_recommendation(
             "gate": "",
             "target_module": "assets" if global_ready["approved_settings"] else "settingsLibrary",
         }
+    pending_close_reading = pending_close_reading_pages(detail)
+    if pending_close_reading:
+        return {
+            "state": "ready",
+            "title": "可以执行章节细读",
+            "detail": f"全局设定和素材已确认，还有 {len(pending_close_reading)} 个骨架页面需要细读后才能审核拆解。",
+            "stage": "close_reading",
+            "action_label": "运行细读拆解",
+            "requires_approval": False,
+            "gate": "",
+        }
     if not approvals.get("draft"):
         return {
             "state": "review",
@@ -3817,6 +3889,7 @@ def agent_inspect(episode_number: int) -> dict:
             "global_assets_ready": global_ready["approved_assets"],
             "global_assets_ready_for_close_reading": global_ready["ok"],
             "global_assets_blocker": global_ready["message"],
+            "close_reading_pending_pages": len(pending_close_reading_pages(detail)),
             "draft_exists": bool(detail.get("pages")),
             "qa_exists": qa_report_ready(status),
             "draft_review_exists": stage_exists(status, "draft_review_md"),
@@ -3883,6 +3956,91 @@ def backup_existing_file(path: str | Path, label: str) -> str:
     return str(backup_path)
 
 
+def restore_asset_backup(job: dict) -> str:
+    if job.get("stage") != "asset_regenerate":
+        return ""
+    backup = Path(str(job.get("backup_path") or ""))
+    target = Path(str(job.get("asset_path") or ""))
+    if not backup.is_file() or not str(target):
+        return ""
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, target)
+    return str(target)
+
+
+def restore_job_backup(job: dict) -> str:
+    if job.get("stage") == "asset_regenerate":
+        return restore_asset_backup(job)
+    if job.get("stage") != "regenerate":
+        return ""
+    backup = Path(str(job.get("backup_path") or ""))
+    target = Path(str(job.get("panel_path") or ""))
+    if not backup.is_file() or not str(job.get("panel_path") or ""):
+        return ""
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, target)
+    return str(target)
+
+
+def complete_asset_regeneration(project: dict, job: dict) -> dict:
+    target = Path(str(job.get("asset_path") or ""))
+    if not target.is_file():
+        raise ValueError(f"素材生成任务已结束，但目标文件未生成：{target}")
+    asset_id = int(job.get("asset_id") or 0)
+    current = db.get_visual_asset(database_url(), asset_id) if asset_id else None
+    if not current:
+        current = db.get_visual_asset_by_path(database_url(), project["slug"], str(target))
+    if not current:
+        raise ValueError("素材生成完成，但没有找到对应的数据库素材记录")
+    if current.get("project_slug") != project.get("slug"):
+        raise ValueError("素材生成结果与当前小说不匹配")
+    regenerated_at = datetime.now().isoformat(timespec="seconds")
+    raw = current.get("raw") if isinstance(current.get("raw"), dict) else {}
+    versions = list(raw.get("regeneration_versions") or [])
+    version = {
+        "job_id": job["id"],
+        "generated_at": regenerated_at,
+        "file_path": str(target),
+        "backup_path": str(job.get("backup_path") or ""),
+        "workflow_path": str(job.get("workflow_path") or ""),
+        "result_path": str(job.get("result_path") or ""),
+    }
+    versions.append(version)
+    updated = db.update_visual_asset(database_url(), int(current["id"]), {
+        "file_path": str(target),
+        "thumbnail_path": str(target),
+        "source_job_id": job["id"],
+        "review_status": "pending_review",
+        "locked": False,
+        "raw": {
+            "last_regenerated_at": regenerated_at,
+            "last_backup_path": str(job.get("backup_path") or ""),
+            "last_workflow_path": str(job.get("workflow_path") or ""),
+            "regeneration_versions": versions,
+        },
+    })
+    db.add_review(database_url(), project["slug"], {
+        "target_type": "visual_asset",
+        "target_id": updated["id"],
+        "action": "regenerate",
+        "comment": "素材已重新生成，已解除锁定并返回待审核。",
+        "before_data": {
+            "source_job_id": current.get("source_job_id"),
+            "review_status": current.get("review_status"),
+            "locked": current.get("locked"),
+        },
+        "after_data": {
+            "source_job_id": updated.get("source_job_id"),
+            "review_status": updated.get("review_status"),
+            "locked": updated.get("locked"),
+            "version": version,
+        },
+    })
+    return {"asset": updated, "version": version}
+
+
 def assemble_page_for_panel(page_id: str) -> dict:
     plan_path = plan_path_for_page(page_id)
     workflow_result_path = workflow_result_path_for_page(page_id)
@@ -3921,9 +4079,27 @@ def assemble_page_for_panel(page_id: str) -> dict:
 
 
 def start_asset_regenerate_job(payload: dict) -> dict:
+    project = active_project()
+    asset_id = int(payload.get("asset_id") or 0)
+    asset = db.get_visual_asset(database_url(), asset_id) if asset_id else None
+    if asset_id and not asset:
+        raise ValueError("视觉素材不存在")
+    if asset and asset.get("project_slug") != project.get("slug"):
+        raise ValueError("素材不属于当前小说")
+    setting = None
+    if asset and int(asset.get("setting_item_id") or 0):
+        setting = db.get_setting_item(database_url(), int(asset["setting_item_id"]))
+        if not setting or setting.get("project_slug") != project.get("slug"):
+            raise ValueError("素材绑定的小说设定不存在")
+        if setting.get("review_status") != "approved" and not setting.get("locked"):
+            raise ValueError("请先审核素材绑定的小说设定，再生成视觉素材")
     alias = str(payload.get("asset_alias") or "").strip()
     target_path = str(payload.get("asset_path") or "").strip()
     category = str(payload.get("asset_category") or "uncategorized").strip() or "uncategorized"
+    if asset:
+        alias = str(asset.get("title") or alias).strip()
+        target_path = str(asset.get("file_path") or target_path).strip()
+        category = str(asset.get("asset_type") or category).strip() or "uncategorized"
     episode_number = int(payload.get("episode_number") or 3)
     if not alias:
         raise ValueError("asset_alias is required")
@@ -3937,8 +4113,34 @@ def start_asset_regenerate_job(payload: dict) -> dict:
     if target.is_file():
         backup_path = backup_existing_file(target, alias)
         reference_path = backup_path
-    if not workflow_path:
-        workflow_path = create_asset_workflow(alias, category, target, reference_path)
+    try:
+        if asset:
+            approved_prompt = str(asset.get("prompt") or "")
+            approved_negative_prompt = str((asset.get("raw") or {}).get("negative_prompt") or "")
+            if setting:
+                approved_prompt = str(
+                    setting.get("visual_prompt")
+                    or setting.get("description")
+                    or approved_prompt
+                )
+                approved_negative_prompt = str(setting.get("negative_prompt") or approved_negative_prompt)
+            workflow_path = create_asset_workflow(
+                alias,
+                category,
+                target,
+                reference_path,
+                approved_prompt,
+                approved_negative_prompt,
+            )
+        elif not workflow_path:
+            workflow_path = create_asset_workflow(alias, category, target, reference_path)
+    except Exception:
+        restore_asset_backup({
+            "stage": "asset_regenerate",
+            "backup_path": backup_path,
+            "asset_path": str(target),
+        })
+        raise
 
     job_id = f"{int(time.time())}-asset-regenerate"
     result_path = project_manifest_dir() / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{int(time.time())}.json"
@@ -3963,8 +4165,10 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         "id": job_id,
         "stage": "asset_regenerate",
         "label": "单素材重新生成",
+        "project_slug": project["slug"],
         "episode_number": episode_number,
         "asset_alias": alias,
+        "asset_id": int(asset.get("id") or 0) if asset else 0,
         "asset_category": category,
         "asset_path": str(target),
         "workflow_path": str(workflow_path),
@@ -3977,9 +4181,21 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         "exit_code": None,
         "stdout_tail": "",
         "stderr_tail": "",
+        "progress": job_progress_state(current="单素材重新生成"),
+        "retry_payload": {
+            "episode_number": episode_number,
+            "asset_alias": alias,
+            "asset_id": int(asset.get("id") or 0) if asset else 0,
+            "asset_path": str(target),
+            "asset_category": category,
+            "poll_seconds": int(payload.get("poll_seconds") or 5),
+            "max_polls": int(payload.get("max_polls") or 180),
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     with JOB_LOCK:
         JOBS[job_id] = job
+    db.save_job(database_url(), project["slug"], job)
     thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -4005,15 +4221,20 @@ def start_regenerate_job(payload: dict) -> dict:
     result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_console_regenerate_{int(time.time())}.json"
     project = active_project()
     generation_context = build_generation_context_snapshot(project, episode_number, page_id, [panel_id])
+    panel_path = str(panel_image_path(panel_id) or "")
+    previous_output = db.get_generated_output_by_path(database_url(), project["slug"], panel_path)
+    previous_metadata = previous_output.get("metadata") if previous_output and isinstance(previous_output.get("metadata"), dict) else {}
+    regenerate_reason = str(payload.get("reason") or previous_metadata.get("review_comment") or "").strip()
+    if regenerate_reason:
+        generation_context["review_feedback"] = regenerate_reason
     runtime_workflow_path = inject_generation_context_into_workflow(workflow_path, generation_context, job_id, panel_id)
-    previous_output = db.get_generated_output_by_path(database_url(), project["slug"], str(panel_image_path(panel_id) or ""))
     backup_path = backup_existing_panel_image(panel_id)
     if previous_output and backup_path:
         record_previous_output_version(
             project,
             previous_output,
             backup_path,
-            str(payload.get("reason") or "单图重生成前备份旧图"),
+            regenerate_reason or "单图重生成前备份旧图",
             job_id,
             {"panel_id": panel_id, "page_id": page_id},
         )
@@ -4038,14 +4259,16 @@ def start_regenerate_job(payload: dict) -> dict:
         "id": job_id,
         "stage": "regenerate",
         "label": "单图重新生成",
+        "project_slug": project["slug"],
         "episode_number": episode_number,
         "page_id": page_id,
         "panel_id": panel_id,
         "workflow_path": str(workflow_path),
         "runtime_workflow_path": str(runtime_workflow_path),
         "backup_path": backup_path,
+        "panel_path": panel_path,
         "previous_output_id": previous_output.get("id") if previous_output else "",
-        "regenerate_reason": str(payload.get("reason") or ""),
+        "regenerate_reason": regenerate_reason,
         "generation_context": generation_context,
         "status": "running",
         "started": datetime.now().isoformat(timespec="seconds"),
@@ -4055,9 +4278,20 @@ def start_regenerate_job(payload: dict) -> dict:
         "exit_code": None,
         "stdout_tail": "",
         "stderr_tail": "",
+        "progress": job_progress_state(current="单图重新生成"),
+        "retry_payload": {
+            "episode_number": episode_number,
+            "page_id": page_id,
+            "panel_id": panel_id,
+            "reason": regenerate_reason,
+            "poll_seconds": int(payload.get("poll_seconds") or 5),
+            "max_polls": int(payload.get("max_polls") or 180),
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     with JOB_LOCK:
         JOBS[job_id] = job
+    db.save_job(database_url(), project["slug"], job)
     thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -4103,6 +4337,7 @@ def start_regenerate_page_job(payload: dict) -> dict:
         "id": job_id,
         "stage": "regenerate_page",
         "label": "按页补生成",
+        "project_slug": project["slug"],
         "episode_number": episode_number,
         "page_id": page_id,
         "panel_ids": panel_ids,
@@ -4116,9 +4351,16 @@ def start_regenerate_page_job(payload: dict) -> dict:
         "stdout_tail": "",
         "stderr_tail": "",
         "progress": {"total": len(targets), "completed": 0, "failed": 0},
+        "retry_payload": {
+            "episode_number": episode_number,
+            "page_id": page_id,
+            "include_existing": include_existing,
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     with JOB_LOCK:
         JOBS[job_id] = job
+    db.save_job(database_url(), project["slug"], job)
     thread = threading.Thread(target=run_regenerate_page_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -4235,10 +4477,44 @@ def cancel_job_api(job_id: str) -> dict:
     return {"ok": True, "job": snapshot}
 
 
+def retry_job_api(job_id: str) -> dict:
+    job = next(
+        (item for item in recent_jobs() if str(item.get("id") or item.get("job_id") or "") == str(job_id)),
+        None,
+    )
+    if not job:
+        raise ValueError("任务不存在")
+    if str(job.get("status") or "") not in {"failed", "waiting", "partial", "interrupted", "cancelled"}:
+        raise ValueError("当前任务状态不能重试")
+    retry_payload = job.get("retry_payload")
+    if not isinstance(retry_payload, dict) or not retry_payload:
+        raise ValueError("该历史任务没有可用的重试参数，请从原流程入口重新启动")
+    project_slug = str(job.get("project_slug") or "")
+    if project_slug and project_slug != active_project()["slug"]:
+        raise ValueError("请先切换到该任务所属小说，再执行重试")
+
+    payload = {**retry_payload, "retried_from": str(job_id)}
+    stage = str(job.get("stage") or "")
+    if stage == "process_novel":
+        if payload.get("import_strategy") != "refresh_chapters":
+            payload["import_strategy"] = "update"
+        return start_process_novel_job(payload)
+    if stage == "setting_scan":
+        payload["confirmed"] = True
+        return start_setting_scan_job(project_slug or active_project()["slug"], payload)
+    if stage in {"asset_regenerate", "regenerate"}:
+        return start_regenerate_job(payload)
+    if stage == "regenerate_page":
+        return start_regenerate_page_job(payload)
+    if stage in STAGE_MAP:
+        return start_job(payload)
+    raise ValueError("该任务类型暂不支持重试，请从原流程入口重新启动")
+
+
 def run_regenerate_page_job(job_id: str) -> None:
     with JOB_LOCK:
         job = dict(JOBS[job_id])
-    project = active_project()
+    project = project_by_slug(job.get("project_slug", ""))
     config = runtime_config()
     env = os.environ.copy()
     env.update({
@@ -4826,6 +5102,61 @@ def call_text_model_test(model: str, text_env_path: str, timeout: int = 30) -> d
                 os.environ[key] = value
 
 
+def call_image_model_test(model: str, base_url: str, image_env_path: str, timeout: int = 120) -> dict:
+    image_env = read_env(Path(image_env_path))
+    api_key = str(image_env.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("图片生成 API Key 未配置")
+    endpoint = str(base_url or "").strip().rstrip("/")
+    if endpoint.endswith("/images/generations"):
+        url = endpoint
+    elif endpoint.endswith("/v1"):
+        url = endpoint + "/images/generations"
+    else:
+        url = endpoint + "/v1/images/generations"
+    payload = {
+        "model": model,
+        "prompt": "A simple black ink circle on a plain white background, no text.",
+        "size": "1024x1024",
+        "quality": "low",
+        "n": 1,
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    started = time.time()
+    try:
+        with urllib.request.urlopen(request, timeout=max(30, min(int(timeout or 120), 600))) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            status = int(getattr(response, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} {body[:600]}") from exc
+    data = json.loads(raw)
+    images = data.get("data") or data.get("images") or data.get("output") or []
+    if isinstance(images, dict):
+        images = [images]
+    first = images[0] if isinstance(images, list) and images else {}
+    if not isinstance(first, dict) or not any(first.get(key) for key in ("b64_json", "base64", "url", "image_url")):
+        raise RuntimeError("图片接口返回成功，但响应中没有可用图片数据")
+    response_kind = next(key for key in ("b64_json", "base64", "url", "image_url") if first.get(key))
+    return {
+        "ok": True,
+        "elapsed_seconds": round(time.time() - started, 2),
+        "status": status,
+        "response_kind": response_kind,
+        "generates_image": True,
+        "saved": False,
+    }
+
+
 def test_model_api(payload: dict) -> dict:
     target = str(payload.get("target") or "").strip().lower()
     if target not in {"text", "image"}:
@@ -4878,6 +5209,42 @@ def test_model_api(payload: dict) -> dict:
     if not node_registered:
         problems.append("ComfyUI 节点注册状态不可确认")
     ok = not problems
+    live = bool(payload.get("live"))
+    if ok and live:
+        try:
+            result = call_image_model_test(
+                model,
+                base_url,
+                config.get("image_env_path", ""),
+                timeout=max(30, min(timeout, 600)),
+            )
+            return {
+                "ok": True,
+                "target": "image",
+                "dry_run": False,
+                "model": model,
+                "base_url": base_url,
+                "message": f"图片生成业务调用成功，耗时 {result.get('elapsed_seconds')} 秒；测试图未保存。",
+                "detail": {
+                    **result,
+                    "comfy_url": health.get("comfy_url", ""),
+                    "node_registered": node_registered,
+                },
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "target": "image",
+                "dry_run": False,
+                "model": model,
+                "base_url": base_url,
+                "message": f"图片生成业务调用失败：{exc}",
+                "detail": {
+                    "comfy_url": health.get("comfy_url", ""),
+                    "node_registered": node_registered,
+                    "generates_image": True,
+                },
+            }
     return {
         "ok": ok,
         "target": "image",
@@ -5383,8 +5750,10 @@ def review_center_api(query: dict | None = None) -> dict:
             "panels": 0,
             "statuses": {},
             "updated": "",
+            "output_ids": [],
         })
         group["count"] += 1
+        group["output_ids"].append(int(row.get("id") or 0))
         if row.get("output_type") == "page":
             group["pages"] += 1
         else:
@@ -5397,7 +5766,7 @@ def review_center_api(query: dict | None = None) -> dict:
         page_id = str(group.get("page_id") or "")
         count = int(group.get("count") or 0)
         status = "needs_work" if group["statuses"].get("needs_work") else "pending_review"
-        items.append(make_review_item(
+        review_item = make_review_item(
             f"output-{episode}-{page_id}",
             "output",
             f"{episode_display(episode)}{page_display(page_id)}有 {count} 个生成结果待处理",
@@ -5415,7 +5784,12 @@ def review_center_api(query: dict | None = None) -> dict:
             group.get("updated", ""),
             count,
             10,
-        ))
+        )
+        review_item["batch"] = {
+            "output_ids": [item for item in group.get("output_ids", []) if item],
+            "scope_page_id": page_id,
+        }
+        items.append(review_item)
     summary["outputs"] = len(output_rows)
 
     breakdowns = [
@@ -7015,6 +7389,12 @@ def start_setting_scan_job(slug: str, payload: dict) -> dict:
             "image_model": effective_config(project).get("COMIC_PIPELINE_IMAGE_MODEL", ""),
             "output_root": effective_config(project).get("COMIC_PIPELINE_OUTPUT_ROOT", ""),
         },
+        "retry_payload": {
+            "limit": limit,
+            "confirmed": True,
+            "extraction_mode": extraction_mode,
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     with JOB_LOCK:
         JOBS[job_id] = job
@@ -7187,11 +7567,29 @@ def update_breakdown_api(breakdown_id: int, payload: dict) -> dict:
         raw["editor_note"] = str(payload.get("editor_note") or "").strip()
     if "summary_note" in payload:
         raw["summary_note"] = str(payload.get("summary_note") or "").strip()
+    page_edits = payload.get("pages") if isinstance(payload.get("pages"), list) else []
     updates = {
         "raw": raw,
         "status": str(payload.get("status") or before.get("status") or "draft_ready"),
         "review_status": str(payload.get("review_status") or before.get("review_status") or "pending_review"),
     }
+    if page_edits:
+        project = db.get_project(database_url(), before["project_slug"])
+        if not project:
+            raise ValueError("章节拆解所属小说不存在")
+        plan_path = project_episode_plan_path(int(before.get("chapter_number") or 0), project)
+        plan = read_optional_json(plan_path)
+        if not isinstance(plan, dict):
+            raise ValueError("章节计划文件不存在或无法读取")
+        edited_plan = apply_breakdown_page_edits(plan, page_edits)
+        plan_path.write_text(json.dumps(edited_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        edited_breakdown = apply_breakdown_page_edits({"pages": before.get("pages") or []}, page_edits)
+        updates.update({
+            "pages": edited_breakdown["pages"],
+            "panels": flatten_panels(edited_breakdown["pages"]),
+            "status": "close_reading_refined_needs_review",
+            "review_status": "pending_review",
+        })
     saved = db.update_chapter_breakdown(database_url(), breakdown_id, updates)
     db.add_review(database_url(), saved["project_slug"], {
         "target_type": "chapter_breakdown",
@@ -7201,7 +7599,70 @@ def update_breakdown_api(breakdown_id: int, payload: dict) -> dict:
         "before_data": before,
         "after_data": saved,
     })
-    return {"ok": True, "breakdown": saved}
+    approvals = None
+    if page_edits and saved.get("project_slug") == active_project()["slug"]:
+        approvals = set_episode_approval_gate(
+            int(saved.get("chapter_number") or 0),
+            "draft",
+            False,
+            validate=False,
+        )
+    return {"ok": True, "breakdown": saved, "approvals": approvals}
+
+
+def apply_breakdown_page_edits(plan: dict, edits: list[dict]) -> dict:
+    updated = json.loads(json.dumps(plan, ensure_ascii=False))
+    pages = updated.get("pages") if isinstance(updated.get("pages"), list) else []
+    page_index = {str(page.get("page_id") or ""): page for page in pages if isinstance(page, dict)}
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        page_id = str(edit.get("page_id") or "").strip()
+        page = page_index.get(page_id)
+        if not page:
+            raise ValueError(f"拆解页面不存在：{page_id or '未指定'}")
+        for field in ("summary", "layout_style", "reading_flow", "visual_priority"):
+            if field in edit:
+                page[field] = str(edit.get(field) or "").strip()
+        if isinstance(edit.get("director"), dict):
+            director = dict(page.get("director") or {})
+            for field in (
+                "page_rhythm",
+                "emotional_arc",
+                "layout_style",
+                "visual_priority",
+                "lettering_strategy",
+                "page_turn_hook",
+                "camera_flow",
+            ):
+                if field not in edit["director"]:
+                    continue
+                value = edit["director"].get(field)
+                if field == "camera_flow" and isinstance(value, str):
+                    value = [item.strip() for item in re.split(r"[；;\n]+", value) if item.strip()]
+                director[field] = value if isinstance(value, list) else str(value or "").strip()
+            page["director"] = director
+        panel_index = {
+            panel_id_for(page_id, panel, index): panel
+            for index, panel in enumerate(page.get("panels") or [])
+            if isinstance(panel, dict)
+        }
+        for panel_edit in edit.get("panels") or []:
+            if not isinstance(panel_edit, dict):
+                continue
+            panel_id = str(panel_edit.get("panel_id") or "").strip()
+            panel = panel_index.get(panel_id)
+            if not panel:
+                raise ValueError(f"拆解分镜不存在：{panel_id or '未指定'}")
+            for field in ("title", "prompt", "panel_role", "shot_type", "visual_priority", "camera_direction"):
+                if field in panel_edit:
+                    panel[field] = str(panel_edit.get(field) or "").strip()
+            panel["close_reading_refined"] = True
+        page["status"] = "close_reading_refined_needs_review"
+        page["close_reading_required"] = False
+        page["close_reading_refined"] = True
+        page["close_reading_updated"] = datetime.now().isoformat(timespec="seconds")
+    return updated
 
 
 def review_breakdown_api(breakdown_id: int, payload: dict) -> dict:
@@ -7535,9 +7996,23 @@ def start_process_novel_job(payload: dict) -> dict:
         "stderr_tail": "",
         "project": project,
         "progress": job_progress_state(current="处理小说"),
+        "retry_payload": {
+            "project_title": title,
+            "project_slug": slug,
+            "novel_path": str(novel),
+            "encoding": str(payload.get("encoding") or current.get("COMIC_PIPELINE_ENCODING") or DEFAULTS["COMIC_PIPELINE_ENCODING"]),
+            "pages_per_chapter": int(payload.get("pages_per_chapter") or current.get("COMIC_PIPELINE_DEFAULT_PAGES") or 8),
+            "panels_per_page": int(payload.get("panels_per_page") or 4),
+            "skeleton_count": int(payload.get("skeleton_count") or 3),
+            "import_strategy": import_strategy or "create",
+            "force": bool(payload.get("force")),
+            "skip_text_model": bool(payload.get("skip_text_model")),
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     with JOB_LOCK:
         JOBS[job_id] = job
+    db.save_job(database_url(), slug, job)
     thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -7625,6 +8100,7 @@ def start_job(payload: dict) -> dict:
         "id": job_id,
         "stage": stage,
         "label": STAGE_MAP[stage]["label"],
+        "project_slug": project["slug"],
         "episode_number": episode_number,
         "status": "running",
         "started": datetime.now().isoformat(timespec="seconds"),
@@ -7637,11 +8113,23 @@ def start_job(payload: dict) -> dict:
         "generation_context": generation_context,
         "generation_context_path": generation_context_path,
         "progress": job_progress_state(current=STAGE_MAP[stage]["label"]),
+        "retry_payload": {
+            "stage": stage,
+            "episode_number": episode_number,
+            "pages": pages,
+            "max_panels": max_panels,
+            "max_pages": max_pages,
+            "dry_run": dry_run,
+            "force": force,
+            "allow_draft_warnings": allow_draft_warnings,
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
     }
     if skeleton:
         job["skeleton"] = skeleton
     with JOB_LOCK:
         JOBS[job_id] = job
+    db.save_job(database_url(), project["slug"], job)
     thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -7724,6 +8212,7 @@ def run_job(job_id: str) -> None:
             }
             live["progress"] = job_progress_state(failed=1, current="任务启动失败")
             try:
+                live["restored_output_path"] = restore_job_backup(live)
                 db.save_job(database_url(), live.get("project_slug") or active_project_slug(), live)
             except Exception as db_exc:
                 live["database_warning"] = str(db_exc)
@@ -7743,6 +8232,7 @@ def run_job(job_id: str) -> None:
             job["stdout_tail"] = "任务已由用户取消。"
             job["stderr_tail"] = "\n".join(stderr.splitlines()[-80:])
             job["result"] = cancelled_result
+            job["restored_output_path"] = restore_job_backup(job)
             current = job.get("progress", {}).get("current") if isinstance(job.get("progress"), dict) else ""
             job["progress"] = job_progress_state(
                 job.get("progress", {}).get("total", 1) if isinstance(job.get("progress"), dict) else 1,
@@ -7758,6 +8248,30 @@ def run_job(job_id: str) -> None:
     result_partial = bool(result and result.get("partial"))
     result_completed = bool(result and result.get("completed"))
     diagnostics = job_diagnostics(job, result, stderr)
+    asset_post_process_error = ""
+    if (completed.returncode == 0 or result_completed) and job.get("stage") == "asset_regenerate":
+        try:
+            post_process = complete_asset_regeneration(project, job)
+        except Exception as exc:
+            asset_post_process_error = str(exc)
+            restore_job_backup(job)
+            result = {
+                "ok": False,
+                "error": asset_post_process_error,
+                "error_type": "asset_output_sync_failed",
+                "process_result": result or {},
+            }
+            diagnostics = {
+                "domain": "asset_regenerate",
+                "title": "素材生成结果未正确入库",
+                "issues": [{
+                    "type": "asset_output_sync_failed",
+                    "severity": "error",
+                    "message": asset_post_process_error,
+                    "action": "检查工作流保存路径和素材数据库记录后重试。",
+                    "retry_hint": "修复输出路径后可重试",
+                }],
+            }
     if (completed.returncode == 0 or result_completed) and job.get("stage") == "regenerate" and job.get("page_id"):
         post_process = assemble_page_for_panel(str(job.get("page_id")))
         try:
@@ -7817,7 +8331,7 @@ def run_job(job_id: str) -> None:
             job["status"] = "waiting"
         elif result_partial:
             job["status"] = "partial"
-        elif completed.returncode == 0 or result_completed:
+        elif (completed.returncode == 0 or result_completed) and not asset_post_process_error:
             job["status"] = "passed"
         else:
             job["status"] = "failed"
@@ -7830,10 +8344,11 @@ def run_job(job_id: str) -> None:
             job["progress"] = job_progress_state(current="等待继续处理", waiting=True)
         elif result_partial:
             job["progress"] = job_progress_state(completed=0, failed=1, current="部分完成", partial=True)
-        elif completed.returncode == 0 or result_completed:
+        elif (completed.returncode == 0 or result_completed) and not asset_post_process_error:
             job["progress"] = job_progress_state(completed=1, current="已完成")
         else:
             job["progress"] = job_progress_state(failed=1, current="执行失败")
+            job["restored_output_path"] = restore_job_backup(job)
         if diagnostics:
             job["diagnostics"] = diagnostics
         if post_process:
@@ -8117,6 +8632,8 @@ class Handler(BaseHTTPRequestHandler):
                 parts = [unquote(item) for item in parsed.path.removeprefix("/api/jobs/").strip("/").split("/") if item]
                 if len(parts) == 2 and parts[1] == "cancel":
                     return self.send_json(cancel_job_api(parts[0]))
+                if len(parts) == 2 and parts[1] == "retry":
+                    return self.send_json(retry_job_api(parts[0]), status=202)
             if parsed.path == "/api/novel-file":
                 return self.send_json(save_uploaded_novel(payload), status=201)
             if parsed.path == "/api/import-preview":

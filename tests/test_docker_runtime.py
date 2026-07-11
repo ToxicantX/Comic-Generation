@@ -14,6 +14,14 @@ class DockerRuntimeTest(unittest.TestCase):
         self.assertIn("powershell", dockerfile)
         self.assertIn("/usr/local/bin/powershell", dockerfile)
 
+    def test_docker_start_script_autostarts_host_generation_backend(self):
+        script = (ROOT / "start_docker.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("SkipGenerationBackend", script)
+        self.assertIn("Start-GenerationBackend", script)
+        self.assertIn("Start-Process", script)
+        self.assertIn("Generation backend ready", script)
+
 
 if __name__ == "__main__":
     unittest.main()

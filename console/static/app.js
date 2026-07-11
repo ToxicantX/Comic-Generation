@@ -43,6 +43,9 @@ const state = {
   settingsSummary: null,
   previewPageId: "",
   settingPromptRefreshTimer: null,
+  statusRefreshInFlight: false,
+  jobPollTimer: null,
+  jobPollInFlight: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -872,11 +875,19 @@ function settingsPayloadFromForm() {
 }
 
 async function testModel(target) {
+  if (target === "image") {
+    const ok = await confirmDialog("将调用图片模型生成一张低质量测试图，会消耗少量图片额度。测试图只用于验证响应，不会保存到素材库。", {
+      title: "测试图片生成业务",
+      kind: "实际调用",
+      confirmText: "开始测试",
+    });
+    if (!ok) return;
+  }
   const resultBox = target === "text" ? $("textModelTestResult") : $("imageModelTestResult");
   setButtons(true);
   if (resultBox) {
     resultBox.className = "model-test-result running";
-    resultBox.textContent = target === "text" ? "正在测试小说处理模型..." : "正在检查图片生成模型配置...";
+    resultBox.textContent = target === "text" ? "正在测试小说处理模型..." : "正在调用图片生成模型...";
   }
   try {
     state.config = await api("/api/config", { method: "POST", body: JSON.stringify(settingsPayloadFromForm()) });
@@ -888,7 +899,8 @@ async function testModel(target) {
       method: "POST",
       body: JSON.stringify({
         target,
-        timeout: target === "text" ? Math.min(Math.max(getInt("textModelTimeout", 300), 30), 120) : 30,
+        timeout: target === "text" ? Math.min(Math.max(getInt("textModelTimeout", 300), 30), 120) : 180,
+        live: target === "image",
       }),
     });
     renderModelTestResult(target, result);
@@ -1066,9 +1078,59 @@ async function loadAgent() {
   renderAgent();
 }
 
-async function refreshRuntimeStatus() {
-  state.status = await api(`/api/status?episode=${state.selectedEpisode}`);
-  renderQaText();
+function hasActiveEpisodeJob() {
+  const episode = Number(state.selectedEpisode || 0);
+  if (!episode) return false;
+  const activeStatuses = new Set(["running", "queued", "starting", "waiting"]);
+  const episodeStages = new Set(["breakdown", "close_reading", "generate", "review", "draft_review", "regenerate"]);
+  return (state.jobs || []).some((job) => {
+    const jobEpisode = Number(job.episode_number || 0);
+    return jobEpisode === episode && activeStatuses.has(String(job.status || "")) && episodeStages.has(String(job.stage || ""));
+  });
+}
+
+function shouldRefreshRuntimeStatus() {
+  if (!state.selectedEpisode) return false;
+  return hasActiveEpisodeJob();
+}
+
+async function refreshRuntimeStatus(options = {}) {
+  if (!options.force && !shouldRefreshRuntimeStatus()) return;
+  if (state.statusRefreshInFlight) return;
+  state.statusRefreshInFlight = true;
+  try {
+    state.status = await api(`/api/status?episode=${state.selectedEpisode}`);
+    renderQaText();
+  } finally {
+    state.statusRefreshInFlight = false;
+  }
+}
+
+function jobPollDelay() {
+  if (document.hidden) return 60000;
+  return hasActiveEpisodeJob() ? 7000 : 30000;
+}
+
+function scheduleJobPoll(delay = jobPollDelay()) {
+  if (state.jobPollTimer) window.clearTimeout(state.jobPollTimer);
+  state.jobPollTimer = window.setTimeout(pollJobs, delay);
+}
+
+async function pollJobs() {
+  if (state.jobPollInFlight) {
+    scheduleJobPoll();
+    return;
+  }
+  state.jobPollInFlight = true;
+  try {
+    await loadJobs();
+    await refreshRuntimeStatus();
+  } catch (_error) {
+    // The next scheduled refresh retries transient console/backend failures.
+  } finally {
+    state.jobPollInFlight = false;
+    scheduleJobPoll();
+  }
 }
 
 async function loadJobs() {
@@ -1456,6 +1518,7 @@ function renderReviewObjectDetail(item = null, timeline = []) {
     return;
   }
   const canOpenTarget = item.target && item.target.module;
+  const canBatchOutput = item.kind === "output" && Array.isArray(item.batch?.output_ids) && item.batch.output_ids.length;
   const actionSummary = group
     ? Object.entries(group.actions).slice(0, 4).map(([label, count]) => `${label} ${count}`).join(" · ")
     : "暂无历史记录";
@@ -1486,15 +1549,58 @@ function renderReviewObjectDetail(item = null, timeline = []) {
         `).join("") || `<small>该对象暂无最近审核记录。</small>`}
       </div>
     </section>
-    <button class="review-detail-jump" type="button" data-review-object-jump ${canOpenTarget ? "" : "disabled"} title="${canOpenTarget ? "在现有工作区定位该对象" : "该对象暂无定位入口"}">
-      <span aria-hidden="true">⌖</span><strong>${canOpenTarget ? (item.action_label || "定位处理") : "暂无定位"}</strong>
-    </button>
+    <div class="review-object-actions">
+      ${canBatchOutput ? `
+        <button type="button" data-review-output-batch="approve" title="通过本页全部待审核输出"><span aria-hidden="true">✓</span><strong>本页全部通过</strong></button>
+        <button type="button" data-review-output-batch="needs_work" title="填写问题并将本页输出批量退回"><span aria-hidden="true">?</span><strong>本页批量待改</strong></button>
+      ` : ""}
+      <button class="review-detail-jump" type="button" data-review-object-jump ${canOpenTarget ? "" : "disabled"} title="${canOpenTarget ? "在现有工作区定位该对象" : "该对象暂无定位入口"}">
+        <span aria-hidden="true">⌖</span><strong>${canOpenTarget ? (item.action_label || "定位处理") : "暂无定位"}</strong>
+      </button>
+    </div>
   `;
   const jumpButton = box.querySelector("[data-review-object-jump]");
   if (jumpButton && canOpenTarget) {
     jumpButton.addEventListener("click", async () => {
       await openReviewTarget(item.target || {});
     });
+  }
+  box.querySelectorAll("[data-review-output-batch]").forEach((button) => {
+    button.addEventListener("click", () => reviewCenterOutputBatch(item, button.dataset.reviewOutputBatch || ""));
+  });
+}
+
+async function reviewCenterOutputBatch(item, action) {
+  const outputIds = item?.batch?.output_ids || [];
+  if (!outputIds.length) return;
+  let comment = "审核中心批量通过";
+  if (action === "needs_work") {
+    comment = window.prompt("请填写本页需要修改的具体问题，后续重生成会保留此审核反馈：", "") || "";
+    if (!comment.trim()) {
+      window.alert("批量待改必须填写具体问题。");
+      return;
+    }
+  } else if (!window.confirm(`确认通过本页 ${outputIds.length} 个生成结果？`)) {
+    return;
+  }
+  setButtons(true);
+  try {
+    await api("/api/outputs/review-batch", {
+      method: "POST",
+      body: JSON.stringify({
+        output_ids: outputIds,
+        action,
+        scope_page_id: item.batch.scope_page_id || "",
+        comment,
+        quality_checks: defaultQualityChecksForAction(action),
+      }),
+    });
+    await Promise.all([loadReviewCenter(), loadDashboard()]);
+    notify(action === "approve" ? "本页生成结果已批量通过。" : "问题已记录，本页结果已批量标记待改。", action === "approve" ? "success" : "warn", "审核完成");
+  } catch (error) {
+    window.alert(error.message || "审核中心批量操作失败");
+  } finally {
+    setButtons(false);
   }
 }
 
@@ -2451,8 +2557,18 @@ function renderBreakdownOverview(pages = []) {
     return sum + (page.panels || []).filter((panel) => !isSkeletonPanel(panel, page)).length;
   }, 0);
   if (!pages.length) return "";
+  const metrics = state.agent?.metrics || {};
+  const globalReady = Boolean(metrics.global_assets_ready_for_close_reading);
+  const globalBlocker = metrics.global_assets_blocker || "需要先完成全局设定和全局素材确认。";
   const running = state.jobs.some((job) => ["running", "waiting"].includes(job.status) && job.stage === "close_reading");
-  const canCloseRead = stats.safe > 0 && !running;
+  const canCloseRead = stats.safe > 0 && !running && globalReady;
+  const closeReadingTitle = !globalReady
+    ? globalBlocker
+    : running
+      ? "细读拆解任务正在运行。"
+      : stats.safe > 0
+        ? `将细读 ${stats.safe} 个未生成页面。`
+        : "当前没有可安全细读的页面。";
   return `
     <section class="breakdown-overview ${stats.skeleton ? "has-skeleton" : ""}">
       <div>
@@ -2469,7 +2585,7 @@ function renderBreakdownOverview(pages = []) {
       </div>
       <p>${stats.skeleton ? "当前拆解结果已经存在，但仍是初始骨架。请先运行“细读拆解”，再进入拆解审核。" : "当前章节已有可审核的细读拆解结果。"}</p>
       <div class="breakdown-overview-actions">
-        <button data-stage="close_reading" class="${stats.skeleton ? "primary" : ""}" type="button" ${canCloseRead ? "" : "disabled"} title="${escapeHtml(running ? "细读拆解任务正在运行。" : (stats.safe > 0 ? `将细读 ${stats.safe} 个未生成页面。` : "当前没有可安全细读的页面。"))}">细读拆解</button>
+        <button data-stage="close_reading" class="${stats.skeleton ? "primary" : ""}" type="button" ${canCloseRead ? "" : "disabled"} title="${escapeHtml(closeReadingTitle)}">细读拆解</button>
         <button data-stage="breakdown" type="button" title="重新检查页面计划、工作流和审稿包">重新智能拆解</button>
         <button data-open-task-center type="button" title="查看最近任务日志">查看任务日志</button>
       </div>
@@ -2603,6 +2719,7 @@ function renderBreakdown() {
     const skeleton = isSkeletonPage(page);
     const panelRows = (page.panels || []).map((panel) => {
       const promptView = panelPromptView(panel, page);
+      const directorMeta = [panel.panel_role, panel.shot_type, panel.visual_priority, panel.camera_direction].filter(Boolean);
       return `
       <article class="panel-row ${promptView.placeholder ? "panel-row-placeholder" : ""}">
         <div>
@@ -2610,6 +2727,7 @@ function renderBreakdown() {
           <small>${escapeHtml(promptView.badge)}</small>
         </div>
         <p>${escapeHtml(promptView.text)}</p>
+        ${directorMeta.length ? `<small class="panel-director-meta">${escapeHtml(directorMeta.join(" · "))}</small>` : ""}
       </article>
     `;
     }).join("");
@@ -2621,9 +2739,13 @@ function renderBreakdown() {
       </summary>
       <div class="page-body">
         <div class="page-copy">
-          <h3>页面摘要</h3>
+          <div class="page-copy-head">
+            <h3>页面摘要</h3>
+            ${skeleton ? "" : `<button data-edit-breakdown-page="${escapeHtml(page.page_id)}" type="button" title="编辑本页导演层与分镜"><span aria-hidden="true">✎</span><strong>编辑本页</strong></button>`}
+          </div>
           ${skeleton ? `<div class="page-stage-notice">本页当前只是初始骨架，尚未生成可审核的真实分镜提示。</div>` : ""}
           <p>${escapeHtml(displaySummaryText(page.summary, "暂无中文摘要"))}</p>
+          ${renderDirectorBlock(page)}
           <details class="source-block">
             <summary>原文片段</summary>
             <pre class="excerpt">${escapeHtml(page.source_excerpt || "暂无原文")}</pre>
@@ -2633,6 +2755,156 @@ function renderBreakdown() {
       </div>
     `;
     box.append(details);
+  }
+  box.querySelectorAll("[data-edit-breakdown-page]").forEach((button) => {
+    button.addEventListener("click", () => openBreakdownPageEditor(button.dataset.editBreakdownPage || ""));
+  });
+}
+
+function layoutStyleLabel(value) {
+  return {
+    splash_opening: "开场主视觉",
+    diagonal_action: "斜向动作",
+    bottom_reveal: "底部揭示",
+    bleed_tension: "出血压迫",
+    inset_reaction: "嵌入反应",
+  }[value] || value || "";
+}
+
+function renderDirectorBlock(page) {
+  const director = page.director || {};
+  const cameraFlow = Array.isArray(director.camera_flow) ? director.camera_flow.join("；") : director.camera_flow;
+  const rows = [
+    ["页面节奏", director.page_rhythm || page.reading_flow],
+    ["情绪弧线", director.emotional_arc],
+    ["推荐版式", layoutStyleLabel(director.layout_style || page.layout_style)],
+    ["视觉重点", director.visual_priority || page.visual_priority],
+    ["对白策略", director.lettering_strategy],
+    ["翻页钩子", director.page_turn_hook],
+    ["镜头流向", cameraFlow],
+  ].filter(([, value]) => value);
+  if (!rows.length) return "";
+  return `
+    <section class="director-summary" aria-label="导演层">
+      <h3>导演层</h3>
+      <dl>${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+    </section>
+  `;
+}
+
+function openBreakdownPageEditor(pageId) {
+  const page = (state.detail?.pages || []).find((item) => item.page_id === pageId);
+  if (!page) return;
+  const director = page.director || {};
+  const cameraFlow = Array.isArray(director.camera_flow) ? director.camera_flow.join("；") : (director.camera_flow || "");
+  const dialog = document.createElement("dialog");
+  dialog.className = "breakdown-page-editor-dialog";
+  dialog.innerHTML = `
+    <form method="dialog" class="breakdown-page-editor-form">
+      <header>
+        <div><span>${escapeHtml(pageDisplayName(page))}</span><h2>编辑细读拆解</h2></div>
+        <button value="cancel" type="submit" title="关闭"><span aria-hidden="true">×</span></button>
+      </header>
+      <div class="breakdown-page-editor-scroll">
+        <section>
+          <h3>页面内容</h3>
+          <label>页面摘要<textarea data-page-field="summary" rows="3">${escapeHtml(page.summary || "")}</textarea></label>
+          <div class="breakdown-editor-grid">
+            <label>推荐版式
+              <select data-page-field="layout_style">
+                ${[
+                  ["", "未指定"],
+                  ["splash_opening", "开场主视觉"],
+                  ["diagonal_action", "斜向动作"],
+                  ["bottom_reveal", "底部揭示"],
+                  ["bleed_tension", "出血压迫"],
+                  ["inset_reaction", "嵌入反应"],
+                ].map(([value, label]) => `<option value="${value}" ${String(page.layout_style || director.layout_style || "") === value ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </label>
+            <label>阅读流向<input data-page-field="reading_flow" value="${escapeHtml(page.reading_flow || "")}"></label>
+            <label>视觉重点<input data-page-field="visual_priority" value="${escapeHtml(page.visual_priority || "")}"></label>
+          </div>
+        </section>
+        <section>
+          <h3>导演层</h3>
+          <div class="breakdown-editor-grid">
+            <label>页面节奏<input data-director-field="page_rhythm" value="${escapeHtml(director.page_rhythm || "")}"></label>
+            <label>情绪弧线<input data-director-field="emotional_arc" value="${escapeHtml(director.emotional_arc || "")}"></label>
+            <label>对白策略<input data-director-field="lettering_strategy" value="${escapeHtml(director.lettering_strategy || "")}"></label>
+            <label>翻页钩子<input data-director-field="page_turn_hook" value="${escapeHtml(director.page_turn_hook || "")}"></label>
+          </div>
+          <label>镜头流向<textarea data-director-field="camera_flow" rows="2">${escapeHtml(cameraFlow)}</textarea></label>
+        </section>
+        <section>
+          <h3>分镜</h3>
+          <div class="breakdown-panel-editors">
+            ${(page.panels || []).map((panel) => `
+              <details data-panel-editor="${escapeHtml(panel.panel_id)}">
+                <summary><strong>${escapeHtml(panelDisplayName(panel))}</strong><span>${escapeHtml(panel.shot_type || "未指定镜头")}</span></summary>
+                <label>标题<input data-panel-field="title" value="${escapeHtml(panel.title || "")}"></label>
+                <label>画面提示<textarea data-panel-field="prompt" rows="3">${escapeHtml(panel.prompt || "")}</textarea></label>
+                <div class="breakdown-editor-grid">
+                  <label>分镜职责<input data-panel-field="panel_role" value="${escapeHtml(panel.panel_role || "")}"></label>
+                  <label>景别<input data-panel-field="shot_type" value="${escapeHtml(panel.shot_type || "")}"></label>
+                  <label>视觉重点<input data-panel-field="visual_priority" value="${escapeHtml(panel.visual_priority || "")}"></label>
+                  <label>镜头方向<input data-panel-field="camera_direction" value="${escapeHtml(panel.camera_direction || "")}"></label>
+                </div>
+              </details>
+            `).join("")}
+          </div>
+        </section>
+      </div>
+      <footer>
+        <button value="cancel" type="submit">取消</button>
+        <button data-save-breakdown-page class="primary" value="default" type="button">保存并重新审核</button>
+      </footer>
+    </form>
+  `;
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.querySelector("[data-save-breakdown-page]").addEventListener("click", async () => {
+    const pagePayload = { page_id: page.page_id, director: {}, panels: [] };
+    dialog.querySelectorAll("[data-page-field]").forEach((field) => {
+      pagePayload[field.dataset.pageField] = field.value;
+    });
+    dialog.querySelectorAll("[data-director-field]").forEach((field) => {
+      pagePayload.director[field.dataset.directorField] = field.value;
+    });
+    dialog.querySelectorAll("[data-panel-editor]").forEach((panelEditor) => {
+      const panel = { panel_id: panelEditor.dataset.panelEditor };
+      panelEditor.querySelectorAll("[data-panel-field]").forEach((field) => {
+        panel[field.dataset.panelField] = field.value;
+      });
+      pagePayload.panels.push(panel);
+    });
+    await saveBreakdownPageEdit(pagePayload, dialog);
+  });
+  dialog.showModal();
+}
+
+async function saveBreakdownPageEdit(pagePayload, dialog) {
+  const id = state.detail?.breakdown?.id;
+  if (!id) return;
+  const saveButton = dialog.querySelector("[data-save-breakdown-page]");
+  saveButton.disabled = true;
+  try {
+    await api(`/api/breakdowns/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        pages: [pagePayload],
+        editor_note: $("breakdownEditorNote").value,
+        comment: `人工编辑${pageDisplayName(pagePayload.page_id)}细读拆解，重新进入审核`,
+      }),
+    });
+    dialog.close();
+    await loadEpisode(state.selectedEpisode);
+    switchTab("breakdown");
+    notify("细读拆解已保存，章节状态已回到待审核。", "warn", "保存成功");
+  } catch (error) {
+    notify(error.message || "保存细读拆解失败", "error", "保存失败");
+  } finally {
+    saveButton.disabled = false;
   }
 }
 
@@ -2755,6 +3027,7 @@ function renderAssets() {
   box.querySelectorAll("[data-asset-regenerate]").forEach((button) => {
     button.addEventListener("click", () => {
       regenerateAsset({
+        id: button.dataset.assetId,
         alias: button.dataset.assetRegenerate,
         path: button.dataset.assetPath,
         category: button.dataset.assetCategory,
@@ -3701,9 +3974,9 @@ function assetCard(item) {
   const viewAction = item.url
     ? `<a href="${item.url}" target="_blank" rel="noreferrer" title="查看素材原图" aria-label="查看素材原图"><i aria-hidden="true">⌕</i><span>查看</span></a>`
     : `<span title="素材文件缺失"><i aria-hidden="true">⌕</i><span>缺失</span></span>`;
-  const regenAction = item.can_regenerate
-    ? `<button data-asset-regenerate="${escapeHtml(item.alias)}" data-asset-path="${escapeHtml(item.path)}" data-asset-category="${escapeHtml(item.category)}" type="button" title="重新生成素材" aria-label="重新生成素材"><i aria-hidden="true">↻</i><span>重生成</span></button>`
-    : `<span title="${escapeHtml(item.action_note || "不可生成")}"><i aria-hidden="true">×</i><span>不可生成</span></span>`;
+  const regenAction = item.can_regenerate && item.db_asset_id
+    ? `<button data-asset-regenerate="${escapeHtml(item.alias)}" data-asset-id="${escapeHtml(item.db_asset_id || "")}" data-asset-path="${escapeHtml(item.path)}" data-asset-category="${escapeHtml(item.category)}" type="button" title="重新生成素材" aria-label="重新生成素材"><i aria-hidden="true">↻</i><span>重生成</span></button>`
+    : `<span title="${escapeHtml(item.db_asset_id ? (item.action_note || "不可生成") : "先同步素材入库")}"><i aria-hidden="true">×</i><span>${item.db_asset_id ? "不可生成" : "先入库"}</span></span>`;
   const dbState = item.db_synced
     ? `${reviewStatusLabel(item.db_review_status)}${item.db_locked ? " · 已锁定" : ""}`
     : "未入库";
@@ -3980,11 +4253,8 @@ function renderJobList(box, jobs = state.jobs) {
     const target = targetLabel ? `<small>目标：${escapeHtml(targetLabel)}${job.backup_path ? " / 已备份旧图" : ""}</small>` : "";
     const diagnostics = jobDiagnosticsHtml(job);
     const progress = jobProgressHtml(job, { compact: true });
-    const retryAction = job.status === "waiting" && job.stage === "generate"
-      ? `<button class="job-retry" data-retry-generate="${escapeHtml(job.episode_number || state.selectedEpisode)}" type="button" title="继续尝试生成缺失分镜"><i aria-hidden="true">↻</i><span>继续补生成</span></button>`
-      : "";
-    const retryCloseReading = job.stage === "close_reading" && ["failed", "waiting"].includes(job.status)
-      ? `<button class="job-retry" data-retry-close-reading="${escapeHtml(job.episode_number || state.selectedEpisode)}" type="button" title="重新运行当前章节细读拆解"><i aria-hidden="true">↻</i><span>重试细读</span></button>`
+    const retryAction = canRetryJob(job)
+      ? `<button class="job-retry" data-job-retry="${escapeHtml(job.id || "")}" type="button" title="使用原任务参数重新启动"><i aria-hidden="true">↻</i><span>重试任务</span></button>`
       : "";
     const cancelAction = canCancelJob(job)
       ? `<button class="job-cancel" data-job-cancel="${escapeHtml(job.id || "")}" type="button" title="取消正在运行的任务"><i aria-hidden="true">×</i><span>取消任务</span></button>`
@@ -4003,17 +4273,14 @@ function renderJobList(box, jobs = state.jobs) {
       </div>
       ${diagnostics}
       ${importSummary}
-      ${retryAction || retryCloseReading || cancelAction ? `<div class="job-actions">${retryAction}${retryCloseReading}${cancelAction}</div>` : ""}
+      ${retryAction || cancelAction ? `<div class="job-actions">${retryAction}${cancelAction}</div>` : ""}
       ${summary ? `<details class="job-log"><summary>结果摘要</summary><pre>${escapeHtml(summary)}</pre></details>` : ""}
       ${job.stderr_tail ? `<details class="job-log"><summary>错误日志</summary><pre>${escapeHtml(stripInternalIdsFromText(job.stderr_tail))}</pre></details>` : ""}
     `;
     box.append(item);
   }
-  box.querySelectorAll("[data-retry-generate]").forEach((button) => {
-    button.addEventListener("click", () => retryGenerate(Number(button.dataset.retryGenerate || state.selectedEpisode)));
-  });
-  box.querySelectorAll("[data-retry-close-reading]").forEach((button) => {
-    button.addEventListener("click", () => retryCloseReading(Number(button.dataset.retryCloseReading || state.selectedEpisode)));
+  box.querySelectorAll("[data-job-retry]").forEach((button) => {
+    button.addEventListener("click", () => retryJob(button.dataset.jobRetry || ""));
   });
   box.querySelectorAll("[data-job-cancel]").forEach((button) => {
     button.addEventListener("click", () => cancelJob(button.dataset.jobCancel || ""));
@@ -4028,6 +4295,11 @@ function renderJobList(box, jobs = state.jobs) {
 
 function canCancelJob(job) {
   return ["running", "queued", "starting"].includes(String(job?.status || ""));
+}
+
+function canRetryJob(job) {
+  return ["failed", "waiting", "partial", "interrupted", "cancelled"].includes(String(job?.status || ""))
+    && Boolean(job?.retry_payload && Object.keys(job.retry_payload).length);
 }
 
 function inferredJobProgress(job) {
@@ -4295,9 +4567,14 @@ function renderTaskDetail(job) {
   const scanReport = settingScanReportHtml(job);
   const fileActions = taskFileActionsHtml(job);
   const progress = jobProgressHtml(job);
-  const cancelActions = canCancelJob(job)
-    ? `<div class="task-detail-actions"><button class="job-cancel" data-job-cancel="${escapeHtml(job.id || "")}" type="button" title="取消正在运行的任务"><span aria-hidden="true">×</span><strong>取消任务</strong></button></div>`
-    : "";
+  const taskActions = [
+    canRetryJob(job)
+      ? `<button class="job-retry" data-job-retry="${escapeHtml(job.id || "")}" type="button" title="使用原任务参数重新启动"><span aria-hidden="true">↻</span><strong>重试任务</strong></button>`
+      : "",
+    canCancelJob(job)
+      ? `<button class="job-cancel" data-job-cancel="${escapeHtml(job.id || "")}" type="button" title="取消正在运行的任务"><span aria-hidden="true">×</span><strong>取消任务</strong></button>`
+      : "",
+  ].filter(Boolean).join("");
   const metaRows = [
     ["状态", statusText(job.status)],
     ["阶段", stageLabel(job.stage)],
@@ -4328,7 +4605,7 @@ function renderTaskDetail(job) {
       ${job.generation_context_path ? `<p>上下文：${escapeHtml(displayPath(job.generation_context_path))}</p>` : ""}
       ${fileActions}
     </section>
-    ${cancelActions}
+    ${taskActions ? `<div class="task-detail-actions">${taskActions}</div>` : ""}
     ${scanReport}
     ${diagnostics ? `<section class="task-detail-block"><h3>诊断</h3>${diagnostics}</section>` : ""}
     ${importSummary ? `<section class="task-detail-block"><h3>导入摘要</h3>${importSummary}</section>` : ""}
@@ -4340,6 +4617,9 @@ function renderTaskDetail(job) {
   bindTaskFileActions(box);
   box.querySelectorAll("[data-job-cancel]").forEach((button) => {
     button.addEventListener("click", () => cancelJob(button.dataset.jobCancel || ""));
+  });
+  box.querySelectorAll("[data-job-retry]").forEach((button) => {
+    button.addEventListener("click", () => retryJob(button.dataset.jobRetry || ""));
   });
 }
 
@@ -4643,6 +4923,20 @@ async function cancelJob(jobId) {
   }
 }
 
+async function retryJob(jobId) {
+  if (!jobId) return;
+  const ok = window.confirm("使用原任务参数重新启动？新任务会单独记录，原任务历史不会被覆盖。");
+  if (!ok) return;
+  try {
+    const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST", body: JSON.stringify({}) });
+    state.selectedTaskJobId = result.id || result.job_id || "";
+    state.taskFilePreview = null;
+    await loadJobs();
+  } catch (error) {
+    window.alert(error.message || "重试任务失败");
+  }
+}
+
 async function regenerateAsset(asset) {
   const ok = window.confirm(`重新生成素材 ${asset.alias}？旧素材会先备份，新图会输出到同一资产路径。`);
   if (!ok) return;
@@ -4652,6 +4946,7 @@ async function regenerateAsset(asset) {
       method: "POST",
       body: JSON.stringify({
         episode_number: state.selectedEpisode,
+        asset_id: asset.id || 0,
         asset_alias: asset.alias,
         asset_path: asset.path,
         asset_category: asset.category,
@@ -5036,6 +5331,9 @@ function stateLabel(value) {
     generated_v001: "已生成",
     draft_ready: "有拆解",
     not_started: "未开始",
+    needs_close_reading: "待细读拆解",
+    skeleton_needs_close_reading: "待细读拆解",
+    close_reading_refined_needs_review: "细读完成，待审核",
     brief_applied_needs_panel_close_reading: "待细化分镜",
     planned_from_beats: "已规划",
     ready: "已就绪",
@@ -5242,8 +5540,8 @@ document.addEventListener("DOMContentLoaded", () => {
   loadAll().catch((error) => {
     $("statusLine").textContent = error.message;
   });
-  setInterval(() => {
-    loadJobs().catch(() => {});
-    refreshRuntimeStatus().catch(() => {});
-  }, 7000);
+  scheduleJobPoll(7000);
+  document.addEventListener("visibilitychange", () => {
+    scheduleJobPoll(document.hidden ? 60000 : 0);
+  });
 });

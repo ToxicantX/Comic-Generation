@@ -2,6 +2,7 @@ import importlib.util
 import os
 import sys
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,12 @@ def load_server_module():
 
 
 class RuntimeConfigTest(unittest.TestCase):
+    def test_read_env_returns_empty_config_when_file_is_missing(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "config" / ".env"
+            self.assertEqual(server.read_env(missing), {})
+
     def test_runtime_config_overrides_file_values_with_environment(self):
         server = load_server_module()
 
@@ -107,6 +114,37 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(result["target"], "image")
         self.assertTrue(result["dry_run"])
         self.assertIn("不生成图片", result["message"])
+
+    def test_image_model_live_test_calls_business_api(self):
+        server = load_server_module()
+        health = {
+            "ok": True,
+            "checks": {"object_info": {"ok": True}},
+            "image_api_key_configured": True,
+            "comfy_url": "http://127.0.0.1:8188",
+        }
+        settings = {
+            "models": {"image_model": "gpt-image-2"},
+            "endpoints": {"image_base_url": "https://image.example"},
+        }
+        config = {"text_env_path": "/tmp/text.env", "image_env_path": "/tmp/image.env"}
+
+        with patch.object(server, "comfy_health", return_value=health):
+            with patch.object(server, "settings_summary", return_value=settings):
+                with patch.object(server, "config_snapshot", return_value=config):
+                    with patch.object(server, "call_image_model_test", return_value={
+                        "ok": True,
+                        "elapsed_seconds": 2.5,
+                        "generates_image": True,
+                        "saved": False,
+                    }) as call_image:
+                        result = server.test_model_api({"target": "image", "live": True, "timeout": 180})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["dry_run"])
+        self.assertTrue(result["detail"]["generates_image"])
+        self.assertFalse(result["detail"]["saved"])
+        call_image.assert_called_once_with("gpt-image-2", "https://image.example", "/tmp/image.env", timeout=180)
 
     def test_text_model_test_requires_text_key(self):
         server = load_server_module()
@@ -198,11 +236,76 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(server.JOBS[job_id]["exit_code"], 127)
         self.assertIn("启动失败", server.JOBS[job_id]["stderr_tail"])
 
+    def test_start_job_persists_project_and_retry_payload_before_launch(self):
+        server = load_server_module()
+        server.JOBS.clear()
+        project = {
+            "slug": "demo",
+            "novel_path": "/tmp/demo.txt",
+            "manifest_dir": "/tmp/demo",
+            "project_config": {},
+        }
+
+        with patch.object(server, "assert_stage_allowed"):
+            with patch.object(server, "active_project", return_value=project):
+                with patch.object(server, "project_episode_plan_path", return_value=Path("/tmp/episode.json")):
+                    with patch.object(server, "project_manifest_dir", return_value=Path("/tmp/demo")):
+                        with patch.object(server.db, "save_job") as save_job:
+                            with patch.object(server.threading, "Thread") as thread:
+                                job = server.start_job({
+                                    "stage": "status",
+                                    "episode_number": 2,
+                                    "pages": 4,
+                                    "max_panels": 1,
+                                    "max_pages": 1,
+                                })
+
+        self.assertEqual(job["project_slug"], "demo")
+        self.assertEqual(job["retry_payload"]["stage"], "status")
+        self.assertEqual(job["retry_payload"]["episode_number"], 2)
+        save_job.assert_called_once()
+        thread.return_value.start.assert_called_once()
+
+    def test_retry_job_dispatches_saved_stage_payload(self):
+        server = load_server_module()
+        source = {
+            "id": "failed-job",
+            "stage": "status",
+            "status": "failed",
+            "project_slug": "ssj",
+            "retry_payload": {"stage": "status", "episode_number": 3},
+        }
+
+        with patch.object(server, "recent_jobs", return_value=[source]):
+            with patch.object(server, "active_project", return_value={"slug": "ssj"}):
+                with patch.object(server, "start_job", return_value={"id": "new-job"}) as start_job:
+                    result = server.retry_job_api("failed-job")
+
+        self.assertEqual(result["id"], "new-job")
+        payload = start_job.call_args.args[0]
+        self.assertEqual(payload["episode_number"], 3)
+        self.assertEqual(payload["retried_from"], "failed-job")
+
+    def test_retry_job_rejects_cross_project_execution(self):
+        server = load_server_module()
+        source = {
+            "id": "other-project-job",
+            "stage": "status",
+            "status": "failed",
+            "project_slug": "other",
+            "retry_payload": {"stage": "status", "episode_number": 1},
+        }
+
+        with patch.object(server, "recent_jobs", return_value=[source]):
+            with patch.object(server, "active_project", return_value={"slug": "ssj"}):
+                with self.assertRaisesRegex(ValueError, "切换到该任务所属小说"):
+                    server.retry_job_api("other-project-job")
+
     def test_close_reading_requires_approved_global_settings(self):
         server = load_server_module()
 
         with patch.object(server, "active_project", return_value={"slug": "ssj", "manifest_dir": "/tmp"}):
-            with patch.object(Path, "is_file", return_value=True):
+            with patch.object(server, "project_episode_plan_path", return_value=SERVER_PATH):
                 with patch.object(server, "config_snapshot", return_value={"config": {"COMIC_PIPELINE_TEXT_MODEL": "gpt-5.4"}}):
                     with patch.object(server.db, "list_setting_items", return_value=[]):
                         with patch.object(server.db, "list_visual_assets", return_value=[]):
@@ -220,12 +323,212 @@ class RuntimeConfigTest(unittest.TestCase):
         }]
 
         with patch.object(server, "active_project", return_value={"slug": "ssj", "manifest_dir": "/tmp"}):
-            with patch.object(Path, "is_file", return_value=True):
+            with patch.object(server, "project_episode_plan_path", return_value=SERVER_PATH):
                 with patch.object(server, "config_snapshot", return_value={"config": {"COMIC_PIPELINE_TEXT_MODEL": "gpt-5.4"}}):
                     with patch.object(server.db, "list_setting_items", return_value=settings):
                         with patch.object(server.db, "list_visual_assets", return_value=[]):
                             with self.assertRaisesRegex(ValueError, "全局素材"):
                                 server.assert_stage_allowed("close_reading", 1)
+
+    def test_close_reading_allows_approved_global_settings_and_assets(self):
+        server = load_server_module()
+        settings = [{"review_status": "approved", "locked": True}]
+        assets = [{"review_status": "approved", "locked": True}]
+
+        with patch.object(server, "active_project", return_value={"slug": "ssj", "manifest_dir": "/tmp"}):
+            with patch.object(server, "project_episode_plan_path", return_value=SERVER_PATH):
+                with patch.object(server, "config_snapshot", return_value={"config": {"COMIC_PIPELINE_TEXT_MODEL": "gpt-5.4"}}):
+                    with patch.object(server.db, "list_setting_items", return_value=settings):
+                        with patch.object(server.db, "list_visual_assets", return_value=assets):
+                            server.assert_stage_allowed("close_reading", 1)
+
+    def test_draft_approval_rejects_skeleton_pages_before_close_reading(self):
+        server = load_server_module()
+        detail = {
+            "pages": [{
+                "page_id": "EP01_P001",
+                "status": "skeleton_needs_close_reading",
+                "summary": "初始页面骨架，需要细读。",
+                "panels": [{"title": "待细读", "prompt": "待细读：第一格"}],
+            }],
+            "media": {"summary": {}},
+        }
+
+        with patch.object(server, "episode_detail", return_value=detail):
+            with patch.object(server, "status_snapshot", return_value={}):
+                with self.assertRaisesRegex(ValueError, "细读"):
+                    server.assert_approval_allowed(1, "draft", server.default_approval_state())
+
+    def test_agent_recommends_close_reading_before_draft_approval(self):
+        server = load_server_module()
+        detail = {
+            "pages": [{
+                "page_id": "EP01_P001",
+                "status": "skeleton_needs_close_reading",
+                "summary": "初始页面骨架，需要细读。",
+                "panels": [{"title": "待细读", "prompt": "待细读：第一格"}],
+            }],
+            "assets": {"total_assets": 1},
+            "media": {"summary": {}},
+        }
+
+        with patch.object(server, "active_project", return_value={"slug": "ssj"}):
+            with patch.object(server, "global_asset_readiness", return_value={
+                "ok": True,
+                "approved_settings": 1,
+                "approved_assets": 1,
+                "message": "",
+            }):
+                with patch.object(server, "generated_output_quality_status", return_value={}):
+                    with patch.object(server, "generated_output_review_blockers", return_value={"count": 0}):
+                        recommendation = server.agent_recommendation(
+                            1,
+                            {"ok": True, "image_api_key_configured": True},
+                            detail,
+                            {},
+                            server.default_approval_state(),
+                        )
+
+        self.assertEqual(recommendation["stage"], "close_reading")
+        self.assertFalse(recommendation["requires_approval"])
+
+    def test_episode_pages_preserve_close_reading_director_fields(self):
+        server = load_server_module()
+        director = {
+            "page_rhythm": "铺垫-冲突-悬念",
+            "emotional_arc": "平静到紧张",
+            "layout_style": "diagonal_action",
+            "visual_priority": "主角拔刀",
+            "lettering_strategy": "对白靠上，页尾留悬念",
+            "page_turn_hook": "黑影逼近",
+            "camera_flow": ["远景到特写"],
+        }
+        plan = {
+            "pages": [{
+                "page_id": "EP01_P001",
+                "title": "遭遇",
+                "status": "close_reading_refined_needs_review",
+                "summary": "主角在荒原遭遇神秘来客。",
+                "director": director,
+                "layout_style": "diagonal_action",
+                "reading_flow": "从左上进入主视觉",
+                "visual_priority": "主角拔刀",
+                "close_reading_required": False,
+                "close_reading_refined": True,
+                "panels": [{
+                    "panel_id": "EP01_P001_PANEL01",
+                    "title": "拔刀",
+                    "prompt": "少年拔刀迎敌",
+                    "panel_role": "动作",
+                    "shot_type": "中景",
+                    "visual_priority": "铜刀出鞘",
+                    "camera_direction": "由左向右",
+                }],
+            }],
+        }
+
+        with patch.object(server, "plan_path_for_page", return_value=Path("/tmp/page-plan.json")):
+            with patch.object(server, "workflow_path_for_panel", return_value=None):
+                pages = server.episode_pages_from_plan(
+                    {"slug": "ssj"},
+                    1,
+                    plan,
+                    {"pages": [], "panels": []},
+                )
+
+        self.assertEqual(pages[0]["director"], director)
+        self.assertTrue(pages[0]["close_reading_refined"])
+        self.assertEqual(pages[0]["panels"][0]["panel_role"], "动作")
+        self.assertEqual(pages[0]["panels"][0]["camera_direction"], "由左向右")
+
+    def test_breakdown_page_edits_update_director_and_panel_fields(self):
+        server = load_server_module()
+        plan = {
+            "pages": [{
+                "page_id": "DEMO_EP01_P001",
+                "status": "close_reading_refined_needs_review",
+                "summary": "原摘要",
+                "director": {"page_rhythm": "原节奏"},
+                "panels": [{
+                    "panel_id": "DEMO_EP01_P001_PANEL01",
+                    "title": "原标题",
+                    "prompt": "原提示",
+                }],
+            }],
+        }
+
+        updated = server.apply_breakdown_page_edits(plan, [{
+            "page_id": "DEMO_EP01_P001",
+            "summary": "新摘要",
+            "layout_style": "diagonal_action",
+            "director": {
+                "page_rhythm": "先静后动",
+                "camera_flow": "全景；中景；近景",
+            },
+            "panels": [{
+                "panel_id": "DEMO_EP01_P001_PANEL01",
+                "title": "新标题",
+                "prompt": "新提示",
+                "shot_type": "近景",
+            }],
+        }])
+
+        page = updated["pages"][0]
+        panel = page["panels"][0]
+        self.assertEqual(page["summary"], "新摘要")
+        self.assertEqual(page["director"]["page_rhythm"], "先静后动")
+        self.assertEqual(page["director"]["camera_flow"], ["全景", "中景", "近景"])
+        self.assertEqual(page["status"], "close_reading_refined_needs_review")
+        self.assertTrue(page["close_reading_refined"])
+        self.assertEqual(panel["title"], "新标题")
+        self.assertEqual(panel["prompt"], "新提示")
+        self.assertEqual(panel["shot_type"], "近景")
+        self.assertTrue(panel["close_reading_refined"])
+
+    def test_next_episode_approval_requires_qa(self):
+        server = load_server_module()
+        detail = {"pages": [], "media": {"summary": {}}}
+
+        with patch.object(server, "episode_detail", return_value=detail):
+            with patch.object(server, "status_snapshot", return_value={}):
+                with self.assertRaisesRegex(ValueError, "QA"):
+                    server.assert_approval_allowed(1, "next_episode", server.default_approval_state())
+
+    def test_next_episode_approval_is_allowed_after_qa(self):
+        server = load_server_module()
+        detail = {"pages": [], "media": {"summary": {}}}
+        approvals = {**server.default_approval_state(), "qa": True}
+
+        with patch.object(server, "episode_detail", return_value=detail):
+            with patch.object(server, "status_snapshot", return_value={}):
+                with patch.object(server, "next_episode_number", return_value=2):
+                    server.assert_approval_allowed(1, "next_episode", approvals)
+
+    def test_revoking_draft_approval_cascades_to_downstream_gates(self):
+        server = load_server_module()
+        saved = {}
+        current = {
+            "EP01": {
+                "draft": True,
+                "assets": True,
+                "generation": True,
+                "qa": True,
+                "next_episode": True,
+            },
+        }
+
+        with patch.object(server, "load_agent_approvals", return_value=current):
+            with patch.object(server, "approval_key", return_value="EP01"):
+                with patch.object(server, "save_agent_approvals", side_effect=lambda value: saved.update(value)):
+                    with patch.object(server, "sync_gate_side_effects"):
+                        result = server.set_episode_approval_gate(1, "draft", False)
+
+        self.assertFalse(result["draft"])
+        self.assertFalse(result["assets"])
+        self.assertFalse(result["generation"])
+        self.assertFalse(result["qa"])
+        self.assertFalse(result["next_episode"])
+        self.assertEqual(saved["EP01"], result)
 
     def test_sync_assets_creates_candidates_from_approved_global_settings(self):
         server = load_server_module()
@@ -285,6 +588,122 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("setting_1", paths[0])
         self.assertIn("setting_2", paths[1])
 
+    def test_asset_workflow_uses_approved_setting_prompts(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "output" / "hero_reference.png"
+            with patch.object(server, "GENERATED_ASSET_WORKFLOW_DIR", root / "workflows"):
+                with patch.object(server, "config_snapshot", return_value={"config": {
+                    "COMIC_PIPELINE_IMAGE_MODEL": "test-image-model",
+                    "COMIC_PIPELINE_IMAGE_ENV_PATH": str(root / "image.env"),
+                }}):
+                    with patch.object(server, "comfy_output_root", return_value=root / "output"):
+                        workflow_path = server.create_asset_workflow(
+                            "hero",
+                            "characters",
+                            target,
+                            approved_prompt="青衣少年，腰悬铜刀，长发束起。",
+                            approved_negative_prompt="现代服饰，短发",
+                        )
+
+            workflow = __import__("json").loads(workflow_path.read_text(encoding="utf-8"))
+            inputs = workflow["prompt"]["1"]["inputs"]
+            self.assertIn("青衣少年", inputs["prompt"])
+            self.assertIn("腰悬铜刀", inputs["prompt"])
+            self.assertIn("现代服饰", inputs["negative_prompt"])
+            self.assertEqual(inputs["model"], "test-image-model")
+
+    def test_generation_context_includes_review_feedback_for_regeneration(self):
+        server = load_server_module()
+        block = server.generation_context_prompt_block({
+            "settings": [],
+            "assets": [],
+            "review_feedback": "角色面部与前页不一致，手部变形，需要保持青衣和铜刀。",
+        })
+
+        self.assertIn("本次重生成审核反馈", block)
+        self.assertIn("角色面部与前页不一致", block)
+        self.assertIn("保持青衣和铜刀", block)
+
+    def test_complete_asset_regeneration_returns_asset_to_review_with_version(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "hero.png"
+            target.write_bytes(b"generated-image")
+            current = {
+                "id": 12,
+                "project_slug": "ssj",
+                "source_job_id": "old-job",
+                "review_status": "approved",
+                "locked": True,
+                "raw": {"regeneration_versions": [{"job_id": "old-job"}]},
+            }
+            updates_seen = []
+
+            def fake_update(_database_url, _asset_id, updates):
+                updates_seen.append(updates)
+                return {**current, **updates}
+
+            with patch.object(server.db, "get_visual_asset", return_value=current):
+                with patch.object(server.db, "update_visual_asset", side_effect=fake_update):
+                    with patch.object(server.db, "add_review") as add_review:
+                        result = server.complete_asset_regeneration({"slug": "ssj"}, {
+                            "id": "asset-job-2",
+                            "stage": "asset_regenerate",
+                            "asset_id": 12,
+                            "asset_path": str(target),
+                            "backup_path": str(Path(temp_dir) / "backup.png"),
+                            "workflow_path": str(Path(temp_dir) / "workflow.json"),
+                            "result_path": str(Path(temp_dir) / "result.json"),
+                        })
+
+            updates = updates_seen[0]
+            self.assertEqual(updates["source_job_id"], "asset-job-2")
+            self.assertEqual(updates["review_status"], "pending_review")
+            self.assertFalse(updates["locked"])
+            self.assertEqual(len(updates["raw"]["regeneration_versions"]), 2)
+            self.assertEqual(result["version"]["job_id"], "asset-job-2")
+            add_review.assert_called_once()
+
+    def test_restore_asset_backup_keeps_version_and_restores_missing_target(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup = root / "backups" / "hero.png"
+            target = root / "hero.png"
+            backup.parent.mkdir()
+            backup.write_bytes(b"previous-image")
+
+            restored = server.restore_asset_backup({
+                "stage": "asset_regenerate",
+                "backup_path": str(backup),
+                "asset_path": str(target),
+            })
+
+            self.assertEqual(restored, str(target))
+            self.assertEqual(target.read_bytes(), b"previous-image")
+            self.assertTrue(backup.is_file())
+
+    def test_restore_failed_panel_regeneration_keeps_version_backup(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup = root / "backups" / "panel.png"
+            target = root / "panel.png"
+            backup.parent.mkdir()
+            backup.write_bytes(b"previous-panel")
+
+            restored = server.restore_job_backup({
+                "stage": "regenerate",
+                "backup_path": str(backup),
+                "panel_path": str(target),
+            })
+
+            self.assertEqual(restored, str(target))
+            self.assertEqual(target.read_bytes(), b"previous-panel")
+            self.assertTrue(backup.is_file())
+
     def test_locking_pending_visual_asset_marks_it_approved(self):
         server = load_server_module()
         current = {
@@ -307,6 +726,25 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(updates_seen[0]["locked"], True)
         self.assertEqual(updates_seen[0]["review_status"], "approved")
+
+    def test_output_needs_work_requires_specific_feedback(self):
+        server = load_server_module()
+        current = {"id": 3, "project_slug": "ssj", "metadata": {}}
+        with patch.object(server, "ensure_database"):
+            with patch.object(server.db, "get_generated_output", return_value=current):
+                with self.assertRaisesRegex(ValueError, "必须填写具体问题"):
+                    server.review_output_api(3, {"action": "needs_work", "comment": ""})
+
+    def test_output_approval_requires_complete_quality_checks(self):
+        server = load_server_module()
+        current = {"id": 3, "project_slug": "ssj", "metadata": {}}
+        with patch.object(server, "ensure_database"):
+            with patch.object(server.db, "get_generated_output", return_value=current):
+                with self.assertRaisesRegex(ValueError, "全部质量检查项"):
+                    server.review_output_api(3, {
+                        "action": "approve",
+                        "quality_checks": [{"key": "character_consistency", "status": "pass"}],
+                    })
 
     def test_editing_approved_setting_saves_and_requires_review_again(self):
         server = load_server_module()

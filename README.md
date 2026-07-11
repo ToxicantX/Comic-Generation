@@ -101,12 +101,16 @@ Docker 模式会一起启动：
 
 - 漫画控制台：`http://127.0.0.1:8199`
 - PostgreSQL：宿主机端口 `55432`
+- 宿主机 ComfyUI：默认从 `G:\ComfyUI` 自动启动并监听 `8188`
 
-ComfyUI 暂时仍作为外部生成后端运行，默认地址是 `http://127.0.0.1:8188`。控制台容器通过 `host.docker.internal:8188` 访问它。
+ComfyUI 作为宿主机生成后端运行，默认地址是 `http://127.0.0.1:8188`。启动脚本会在后端未运行时自动拉起它，控制台容器通过 `host.docker.internal:8188` 访问。使用其他安装目录时传入 `-ComfyRoot`；只启动控制台和数据库时传入 `-SkipGenerationBackend`。
 
 ```powershell
 cd E:\workspace\ComfyUIProjects\comic-pipeline
 powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 -Build
+
+# 自定义 ComfyUI 目录
+powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 -ComfyRoot "D:\ComfyUI"
 ```
 
 首次启动时脚本只会在缺失时创建：
