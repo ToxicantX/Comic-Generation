@@ -20,7 +20,9 @@ docs/superpowers/
 
 # Generated project manifests and panel workflows
 manifests/projects/
+manifests/comic_runs/
 manifests/*_check.json
+workflows/comic/generated_assets/
 workflows/comic/ssj_*.json
 workflows/comic/ssj-*.json
 workflows/comic/*_fallback_v*.json

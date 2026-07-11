@@ -11,6 +11,8 @@ param(
     [int]$TextModelTimeout = 300,
     [string]$TextModelStream = "true",
     [string]$ImageModel = "gpt-image-2",
+    [ValidateSet("auto", "low", "medium", "high")]
+    [string]$ImageQuality = "auto",
     [int]$DefaultPages = 8,
     [string]$Encoding = "gb18030",
     [switch]$Force
@@ -48,6 +50,7 @@ if (-not $NovelPath) {
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT=$TextModelTimeout",
     "COMIC_PIPELINE_TEXT_MODEL_STREAM=$TextModelStream",
     "COMIC_PIPELINE_IMAGE_MODEL=$ImageModel",
+    "COMIC_PIPELINE_IMAGE_QUALITY=$ImageQuality",
     "COMIC_PIPELINE_PYTHON_PATH=python",
     "COMIC_PIPELINE_DEFAULT_PAGES=$DefaultPages",
     "COMIC_PIPELINE_ENCODING=$Encoding",

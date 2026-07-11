@@ -1654,6 +1654,10 @@ button.primary:hover { background: var(--accent-strong); color: #fff; }
   gap: 10px;
 }
 
+.novel-card.manager-open {
+  grid-column: 1 / -1;
+}
+
 .project-manager-head {
   display: flex;
   justify-content: space-between;
@@ -1700,6 +1704,52 @@ button.primary:hover { background: var(--accent-strong); color: #fff; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.project-backup-tools {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) max-content max-content max-content;
+  gap: 8px;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.project-backup-tools > div {
+  display: grid;
+  gap: 3px;
+}
+
+.project-backup-tools small {
+  color: var(--muted);
+}
+
+.project-backup-tools button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.project-backup-option {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.project-backup-option input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .effective-config {
@@ -2210,6 +2260,37 @@ button.primary:hover { background: var(--accent-strong); color: #fff; }
 .asset-toolbar .search,
 .asset-toolbar .filter-select {
   margin: 0;
+}
+
+.asset-batch-toolbar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: max-content max-content max-content max-content minmax(240px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.asset-batch-toolbar > strong {
+  min-width: 88px;
+  font-size: 13px;
+}
+
+.asset-batch-toolbar button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.asset-batch-toolbar small {
+  color: var(--muted);
+  text-align: right;
+  font-weight: 700;
 }
 
 .hero-panel {
@@ -3381,6 +3462,37 @@ pre {
 .asset-card, .media-card {
   position: relative;
   overflow: hidden;
+}
+
+.asset-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent), var(--shadow);
+}
+
+.asset-select-control {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(16, 24, 40, .24);
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 2px 8px rgba(16, 24, 40, .14);
+}
+
+.asset-select-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.asset-select-control:has(input:disabled) {
+  opacity: .52;
+  cursor: not-allowed;
 }
 
 .asset-card img, .media-card img, .missing-thumb {

@@ -14,7 +14,7 @@ RUN apt-get update \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
         > /etc/apt/sources.list.d/microsoft-prod.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends powershell \
+    && apt-get install -y --no-install-recommends powershell fonts-noto-cjk \
     && ln -sf /usr/bin/pwsh /usr/local/bin/powershell \
     && pip install --no-cache-dir -r /app/requirements.txt \
     && apt-get clean \

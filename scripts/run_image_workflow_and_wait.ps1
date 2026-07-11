@@ -46,7 +46,7 @@ try {
             $result.status = "submit_missing_prompt_id"
             $result.error = "Submit script did not return a prompt_id."
         } else {
-            $waitOutput = & powershell -ExecutionPolicy Bypass -File $WaitScript -PromptId $result.prompt_id -PollSeconds $PollSeconds -MaxPolls $MaxPolls
+            $waitOutput = & powershell -ExecutionPolicy Bypass -File $WaitScript -PromptId $result.prompt_id -ComfyUrl $comicConfig.ComfyUrl -PollSeconds $PollSeconds -MaxPolls $MaxPolls
             $result.wait_result = $waitOutput | ConvertFrom-Json
             $result.completed = [bool]$result.wait_result.completed
             $result.status = $result.wait_result.status

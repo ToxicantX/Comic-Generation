@@ -107,11 +107,20 @@ def check_panel(page: dict, panel: dict, asset_aliases: dict) -> dict:
     lowered = prompt.lower()
     for term in PROHIBITED_PROMPT_TERMS:
         if term in lowered:
+            if term in {"speech bubble", "caption in image"} and (
+                "do not render text" in lowered or "no text" in lowered or "无画面内文字" in prompt
+            ):
+                continue
             issues.append(f"prohibited_prompt_term:{term}")
     for term in PROHIBITED_NEGATED_TERMS:
         if term in lowered and f"no {term}" not in lowered:
             issues.append(f"prohibited_prompt_term:{term}")
-    if "no baked-in text" not in lowered and "no text" not in lowered:
+    if (
+        "no baked-in text" not in lowered
+        and "no text" not in lowered
+        and "do not render text" not in lowered
+        and "无画面内文字" not in prompt
+    ):
         warnings.append("missing_no_text_instruction")
 
     if not workflow.is_file():

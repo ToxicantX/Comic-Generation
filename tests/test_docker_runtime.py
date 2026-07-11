@@ -12,6 +12,7 @@ class DockerRuntimeTest(unittest.TestCase):
         self.assertIn("packages.microsoft.com", dockerfile)
         self.assertIn("apt-get install", dockerfile)
         self.assertIn("powershell", dockerfile)
+        self.assertIn("fonts-noto-cjk", dockerfile)
         self.assertIn("/usr/local/bin/powershell", dockerfile)
 
     def test_docker_start_script_autostarts_host_generation_backend(self):

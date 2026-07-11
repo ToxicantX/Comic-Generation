@@ -930,16 +930,15 @@ def measure_text_box_height(
 ) -> int:
     inner_width = max(24, width - padding * 2)
     base_size = font.size if hasattr(font, "size") else 32
-    font_path = getattr(font, "path", None)
     for size in range(base_size, MIN_LETTERING_FONT_SIZE - 1, -2):
-        candidate = ImageFont.truetype(font_path, size=size) if font_path else font
+        candidate = resized_font(font, size)
         lines = wrap_text(text, candidate, inner_width)
         line_h = line_height(candidate)
         needed = padding * 2 + line_h * max(1, len(lines))
         if needed <= max_height and lines_fit_width(lines, candidate, inner_width):
             return max(min_height, needed)
 
-    fallback = ImageFont.truetype(font_path, size=MIN_LETTERING_FONT_SIZE) if font_path else font
+    fallback = resized_font(font, MIN_LETTERING_FONT_SIZE)
     line_h = line_height(fallback)
     lines = wrap_text(text, fallback, inner_width)
     max_lines = max(1, (max_height - padding * 2) // line_h)
@@ -1030,16 +1029,15 @@ def fit_text_layout(
     max_height: int,
 ) -> tuple[ImageFont.ImageFont, list[str], int]:
     base_size = font.size if hasattr(font, "size") else 32
-    font_path = getattr(font, "path", None)
     for size in range(base_size, MIN_LETTERING_FONT_SIZE - 1, -2):
-        candidate = ImageFont.truetype(font_path, size=size) if font_path else font
+        candidate = resized_font(font, size)
         line_h = line_height(candidate)
         max_lines = max(1, max_height // line_h)
         lines = wrap_text(text, candidate, max_width)
         if len(lines) <= max_lines and lines_fit_width(lines, candidate, max_width):
             return candidate, lines, line_h
 
-    fallback = ImageFont.truetype(font_path, size=MIN_LETTERING_FONT_SIZE) if font_path else font
+    fallback = resized_font(font, MIN_LETTERING_FONT_SIZE)
     line_h = line_height(fallback)
     max_lines = max(1, max_height // line_h)
     lines = fit_lines_to_box(wrap_text(text, fallback, max_width), fallback, max_width, max_lines)
@@ -1110,6 +1108,9 @@ def wrap_text(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]
 
 def load_font(size: int) -> ImageFont.ImageFont:
     candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simhei.ttf",
         r"C:\Windows\Fonts\simsun.ttc",
@@ -1119,6 +1120,16 @@ def load_font(size: int) -> ImageFont.ImageFont:
         if Path(candidate).is_file():
             return ImageFont.truetype(candidate, size=size)
     return ImageFont.load_default()
+
+
+def resized_font(font: ImageFont.ImageFont, size: int) -> ImageFont.ImageFont:
+    font_path = getattr(font, "path", None)
+    if isinstance(font_path, (str, Path)):
+        try:
+            return ImageFont.truetype(str(font_path), size=size)
+        except OSError:
+            pass
+    return font
 
 
 def assess_layout_quality(plan: dict, panels: list[dict]) -> dict:

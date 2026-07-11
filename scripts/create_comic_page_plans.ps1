@@ -109,6 +109,32 @@ foreach ($page in $episode.pages) {
     $pageNumber = [int]([regex]::Match([string]$page.page_id, 'P(\d+)$').Groups[1].Value)
     $layoutPreset = Get-ComicPageLayoutPreset -PageNumber $pageNumber
     $layoutSet = @($layoutPreset.panels)
+    $panelCount = @($page.panels).Count
+    if ($panelCount -eq 1) {
+        $layoutPreset.name = "single_splash"
+        $layoutPreset.reading_flow = "single full-page visual"
+        $layoutPreset.visual_priority = "full-page focal image"
+        $layoutSet = @(
+            [ordered]@{ x = 0; y = 0; w = 1600; h = 2400; role = "full_page_splash"; shot_type = "full_page"; shape = "rect"; border = 0; render_order = 1 }
+        )
+    } elseif ($panelCount -eq 2) {
+        $layoutPreset.name = "compact_dual"
+        $layoutPreset.reading_flow = "top setup, bottom consequence"
+        $layoutPreset.visual_priority = "balanced vertical sequence"
+        $layoutSet = @(
+            [ordered]@{ x = 0; y = 0; w = 1600; h = 1182; role = "upper_scene"; shot_type = "wide"; shape = "rect"; border = 0; render_order = 1 },
+            [ordered]@{ x = 0; y = 1218; w = 1600; h = 1182; role = "lower_scene"; shot_type = "reveal"; shape = "rect"; border = 0; render_order = 2 }
+        )
+    } elseif ($panelCount -eq 3) {
+        $layoutPreset.name = "compact_triple"
+        $layoutPreset.reading_flow = "two upper beats, one dominant lower reveal"
+        $layoutPreset.visual_priority = "dominant lower panel"
+        $layoutSet = @(
+            [ordered]@{ x = 0; y = 0; w = 782; h = 900; role = "upper_left"; shot_type = "setup"; shape = "rect"; border = 0; render_order = 1 },
+            [ordered]@{ x = 818; y = 0; w = 782; h = 900; role = "upper_right"; shot_type = "reaction"; shape = "rect"; border = 0; render_order = 2 },
+            [ordered]@{ x = 0; y = 936; w = 1600; h = 1464; role = "lower_reveal"; shot_type = "splash"; shape = "rect"; border = 0; render_order = 3 }
+        )
+    }
     $panelPlans = @()
     $panelIndex = 0
     foreach ($panel in $page.panels) {
@@ -129,6 +155,7 @@ foreach ($page in $episode.pages) {
             shot_type = $layout.shot_type
             filename_prefix = "ComicPipeline/panels/$($page.page_id)_PANEL$($panelNumber)_v001"
             fallback_filename_prefix = "ComicPipeline/panels/$($page.page_id)_PANEL$($panelNumber)_v001"
+            reference_alias = if ($panel.PSObject.Properties.Name -contains "reference_alias") { [string]$panel.reference_alias } else { "" }
             reference_image = $referenceImage
             fallback_reference_image = ""
             prompt = $panel.prompt

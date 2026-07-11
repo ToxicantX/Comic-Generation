@@ -172,7 +172,7 @@ function Get-AssemblyManifestPath {
             $plan = Get-Content -LiteralPath $PlanPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($plan.page_id) {
                 $pageId = ([string]$plan.page_id).ToLowerInvariant()
-                return (Join-Path $comicConfig.Workspace "manifests\$($pageId)_assembly.json")
+                return (Join-Path (Split-Path $PlanPath) "$($pageId)_assembly.json")
             }
         } catch {
         }
@@ -180,7 +180,7 @@ function Get-AssemblyManifestPath {
 
     $stem = [IO.Path]::GetFileNameWithoutExtension($PlanPath)
     $stem = $stem -replace "_plan$", ""
-    return (Join-Path $comicConfig.Workspace "manifests\$($stem)_assembly.json")
+    return (Join-Path (Split-Path $PlanPath) "$($stem)_assembly.json")
 }
 
 function Get-AssemblySummary {
@@ -330,6 +330,10 @@ try {
     $jobs = @(Get-MissingPanelJobs -Status $status)
     $result.jobs_discovered = $jobs.Count
 
+    if (-not $DryRun -and $MaxPanels -ne 0 -and [int]$status.summary.incomplete_pages -gt 0 -and $jobs.Count -eq 0) {
+        throw "No missing panel jobs were discovered for an incomplete episode. Check project manifest paths."
+    }
+
     if ($MaxPanels -gt 0) {
         $jobs = @($jobs | Select-Object -First $MaxPanels)
     }
@@ -410,7 +414,9 @@ try {
             }
         }
         $result.jobs_attempted += $attempt
-        $touchedPages[$job.page_id] = $job
+        if ($attempt.completed) {
+            $touchedPages[$job.page_id] = $job
+        }
 
         if (-not $attempt.completed -and $CooldownSeconds -gt 0 -and $jobIndex -lt $jobs.Count) {
             Start-Sleep -Seconds $CooldownSeconds

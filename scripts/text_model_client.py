@@ -116,6 +116,7 @@ def chat_json(
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {config['api_key']}",
+            "User-Agent": "ComicPipeline/1.0",
         },
         method="POST",
     )

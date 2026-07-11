@@ -1,5 +1,7 @@
 import argparse
 import base64
+import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -12,10 +14,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import db
@@ -38,6 +41,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 MANIFESTS_DIR = ROOT / "manifests"
 PROJECT_MANIFESTS_ROOT = MANIFESTS_DIR / "projects"
 NOVELS_DIR = ROOT / "novels"
+BACKUPS_DIR = ROOT / "backups"
 LOG_DIR = ROOT / "logs"
 RUN_SCRIPT = SCRIPTS_DIR / "run_comic_episode_pipeline.ps1"
 RUN_IMAGE_WORKFLOW_SCRIPT = SCRIPTS_DIR / "run_image_workflow_and_wait.ps1"
@@ -47,6 +51,10 @@ CLOSE_READING_SCRIPT = SCRIPTS_DIR / "refine_comic_episode_close_reading.py"
 DEFAULT_PROJECT_SLUG = "sou_shen_ji"
 GENERATED_ASSET_WORKFLOW_DIR = ROOT / "workflows" / "comic" / "generated_assets"
 MAX_NOVEL_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_ASSET_BATCH_SIZE = 20
+MAX_BACKUP_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_BACKUP_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_BACKUP_FILES = 20000
 ALLOWED_NOVEL_EXTENSIONS = {".txt", ".md", ".text", ".novel"}
 
 PIPELINE_KEYS = [
@@ -63,6 +71,7 @@ PIPELINE_KEYS = [
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT",
     "COMIC_PIPELINE_TEXT_MODEL_STREAM",
     "COMIC_PIPELINE_IMAGE_MODEL",
+    "COMIC_PIPELINE_IMAGE_QUALITY",
     "COMIC_PIPELINE_PYTHON_PATH",
     "COMIC_PIPELINE_DEFAULT_PAGES",
     "COMIC_PIPELINE_ENCODING",
@@ -83,6 +92,7 @@ DEFAULTS = {
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "300",
     "COMIC_PIPELINE_TEXT_MODEL_STREAM": "true",
     "COMIC_PIPELINE_IMAGE_MODEL": "gpt-image-2",
+    "COMIC_PIPELINE_IMAGE_QUALITY": "auto",
     "COMIC_PIPELINE_PYTHON_PATH": sys.executable,
     "COMIC_PIPELINE_DEFAULT_PAGES": "8",
     "COMIC_PIPELINE_ENCODING": "gb18030",
@@ -972,10 +982,13 @@ def create_asset_workflow(
     reference_path: str = "",
     approved_prompt: str = "",
     approved_negative_prompt: str = "",
+    project: dict | None = None,
 ) -> Path:
-    config = config_snapshot()["config"]
+    config = effective_config(project) if project else config_snapshot()["config"]
     GENERATED_ASSET_WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
-    workflow_path = GENERATED_ASSET_WORKFLOW_DIR / f"{safe_stem(alias)}_asset_regenerate_v001.json"
+    project_prefix = f"{safe_stem(project.get('slug', ''))}_" if project else ""
+    target_stem = safe_stem(Path(target_path).stem)
+    workflow_path = GENERATED_ASSET_WORKFLOW_DIR / f"{project_prefix}{target_stem}_asset_regenerate_v001.json"
     prompt = asset_prompt(alias, category, bool(reference_path))
     if approved_prompt.strip():
         prompt += f"\n\nApproved novel setting (must follow):\n{approved_prompt.strip()}"
@@ -986,8 +999,9 @@ def create_asset_workflow(
         "prompt": prompt,
         "model": config.get("COMIC_PIPELINE_IMAGE_MODEL", DEFAULTS["COMIC_PIPELINE_IMAGE_MODEL"]),
         "size": asset_image_size(category),
+        "quality": config.get("COMIC_PIPELINE_IMAGE_QUALITY", DEFAULTS["COMIC_PIPELINE_IMAGE_QUALITY"]),
         "negative_prompt": negative_prompt,
-        "api_key_env_path": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or str(IMAGE_ENV_PATH),
+        "api_key_env_path": ".comic-pipeline/image.env",
     }
     if reference_path:
         inputs["reference_image_paths"] = reference_path
@@ -1791,17 +1805,154 @@ def compact_text(value: str, max_chars: int = 180) -> str:
     return text[:max_chars]
 
 
+CHAPTER_ASSET_SETTING_TYPES = {"character", "location", "prop"}
+CHAPTER_ASSET_IMPORTANCE = {"core", "high"}
+
+
+def chapter_reference_text(pages: list[dict]) -> str:
+    values = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        for field in ("summary", "source_excerpt", "visual_priority"):
+            if page.get(field):
+                values.append(str(page[field]))
+        for panel in page.get("panels") or []:
+            if not isinstance(panel, dict):
+                continue
+            for field in ("title", "prompt", "caption", "visual_priority"):
+                if panel.get(field):
+                    values.append(str(panel[field]))
+            dialogue = panel.get("dialogue") or []
+            if isinstance(dialogue, list):
+                for item in dialogue:
+                    values.append(str(item.get("text") or item) if isinstance(item, dict) else str(item))
+            elif dialogue:
+                values.append(str(dialogue))
+    return "\n".join(values)
+
+
+def infer_referenced_setting_ids(
+    episode_number: int,
+    pages: list[dict],
+    settings: list[dict],
+    explicit_ids: list | None = None,
+) -> list[int]:
+    explicit = {int(item) for item in (explicit_ids or []) if str(item).strip().isdigit()}
+    text = chapter_reference_text(pages)
+    referenced = set(explicit)
+    for setting in settings:
+        setting_id = int(setting.get("id") or 0)
+        if not setting_id:
+            continue
+        chapter_numbers = {
+            int(item) for item in (setting.get("chapter_numbers") or [])
+            if str(item).strip().isdigit()
+        }
+        terms = [str(setting.get("name") or "").strip()]
+        aliases = setting.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        terms.extend(str(item).strip() for item in aliases)
+        mentioned = any(term and len(term) >= 2 and term in text for term in terms)
+        if episode_number in chapter_numbers or mentioned:
+            referenced.add(setting_id)
+    return sorted(referenced)
+
+
+def chapter_asset_coverage(
+    project: dict,
+    episode_number: int,
+    pages: list[dict] | None = None,
+    settings: list[dict] | None = None,
+    assets: list[dict] | None = None,
+    breakdown: dict | None = None,
+) -> dict:
+    settings = settings if settings is not None else db.list_setting_items(database_url(), project["slug"])
+    assets = assets if assets is not None else db.list_visual_assets(database_url(), project["slug"])
+    breakdown = breakdown if breakdown is not None else db.get_chapter_breakdown(database_url(), project["slug"], episode_number)
+    pages = pages if pages is not None else ((breakdown or {}).get("pages") or [])
+    reference_ids = infer_referenced_setting_ids(
+        episode_number,
+        pages,
+        settings,
+        (breakdown or {}).get("referenced_setting_ids") or [],
+    )
+    by_id = {int(item.get("id") or 0): item for item in settings if int(item.get("id") or 0)}
+    required = [
+        by_id[setting_id]
+        for setting_id in reference_ids
+        if setting_id in by_id
+        and str(by_id[setting_id].get("item_type") or "") in CHAPTER_ASSET_SETTING_TYPES
+        and str(by_id[setting_id].get("importance") or "normal") in CHAPTER_ASSET_IMPORTANCE
+    ]
+    approved_required = [
+        item for item in required
+        if item.get("review_status") == "approved" or item.get("locked")
+    ]
+    approved_asset_setting_ids = set()
+    for asset in assets:
+        setting_id = int(asset.get("setting_item_id") or 0)
+        file_path = str(asset.get("file_path") or "")
+        if not setting_id or not file_path or not Path(file_path).is_file():
+            continue
+        if asset.get("review_status") == "approved" or asset.get("locked"):
+            approved_asset_setting_ids.add(setting_id)
+    missing_setting_review = [item for item in required if item not in approved_required]
+    missing_assets = [
+        item for item in approved_required
+        if int(item.get("id") or 0) not in approved_asset_setting_ids
+    ]
+    blockers = []
+    if missing_setting_review:
+        blockers.append("本章核心设定待审核：" + "、".join(item.get("name") or "未命名设定" for item in missing_setting_review[:6]))
+    if missing_assets:
+        blockers.append("本章核心素材未生成或未审核：" + "、".join(item.get("name") or "未命名设定" for item in missing_assets[:6]))
+    required_rows = [{
+        "id": int(item.get("id") or 0),
+        "name": item.get("name") or "",
+        "item_type": item.get("item_type") or "",
+        "type_label": setting_type_label(item.get("item_type") or ""),
+        "importance": item.get("importance") or "normal",
+        "setting_ready": item in approved_required,
+        "asset_ready": int(item.get("id") or 0) in approved_asset_setting_ids,
+    } for item in required]
+    return {
+        "ok": not blockers,
+        "episode_number": episode_number,
+        "reference_ids": reference_ids,
+        "required": required_rows,
+        "required_count": len(required_rows),
+        "covered_count": len([item for item in required_rows if item["setting_ready"] and item["asset_ready"]]),
+        "missing_setting_review": [item.get("name") or "" for item in missing_setting_review],
+        "missing_assets": [item.get("name") or "" for item in missing_assets],
+        "blockers": blockers,
+        "message": "；".join(blockers),
+    }
+
+
 def build_generation_context_snapshot(project: dict, episode_number: int, page_id: str = "", panel_ids: list[str] | None = None) -> dict:
     settings = db.list_setting_items(database_url(), project["slug"])
+    breakdown = db.get_chapter_breakdown(database_url(), project["slug"], episode_number)
+    reference_ids = set(infer_referenced_setting_ids(
+        episode_number,
+        (breakdown or {}).get("pages") or [],
+        settings,
+        (breakdown or {}).get("referenced_setting_ids") or [],
+    ))
     approved_settings = [
         item for item in settings
         if item.get("review_status") == "approved" or item.get("locked")
     ]
+    if reference_ids:
+        approved_settings = [item for item in approved_settings if int(item.get("id") or 0) in reference_ids]
     assets = db.list_visual_assets(database_url(), project["slug"])
     locked_assets = [
         item for item in assets
         if item.get("locked") or item.get("review_status") == "approved"
     ]
+    if reference_ids:
+        locked_assets = [item for item in locked_assets if int(item.get("setting_item_id") or 0) in reference_ids]
     setting_items = []
     for item in approved_settings[:24]:
         setting_items.append({
@@ -1830,6 +1981,7 @@ def build_generation_context_snapshot(project: dict, episode_number: int, page_i
         "episode_number": int(episode_number or 0),
         "page_id": page_id,
         "panel_ids": [str(item) for item in (panel_ids or []) if item],
+        "referenced_setting_ids": sorted(reference_ids),
         "settings": setting_items,
         "assets": asset_items,
         "summary": {
@@ -1839,6 +1991,30 @@ def build_generation_context_snapshot(project: dict, episode_number: int, page_i
             "assets_included": len(asset_items),
         },
     }
+
+
+def hydrate_episode_asset_aliases(project: dict, episode_number: int, context: dict) -> dict:
+    plan_path = project_episode_plan_path(episode_number, project)
+    plan = read_optional_json(plan_path) or {}
+    assets = [
+        item for item in (context.get("assets") or [])
+        if str(item.get("title") or "").strip() and Path(str(item.get("file_path") or "")).is_file()
+    ]
+    assets.sort(key=lambda item: ({"characters": 0, "world_scenes": 1, "weapons": 2}.get(item.get("type"), 9), int(item.get("id") or 0)))
+    aliases = {str(item["title"]).strip(): str(item["file_path"]) for item in assets}
+    for page in plan.get("pages") or []:
+        for panel in page.get("panels") or []:
+            current = str(panel.get("reference_alias") or "").strip()
+            if current in aliases:
+                continue
+            prompt = str(panel.get("prompt") or "")
+            matches = [alias for alias in aliases if alias in current]
+            if not matches:
+                matches = [alias for alias in aliases if alias in prompt]
+            panel["reference_alias"] = matches[0] if matches else ""
+    plan["asset_aliases"] = aliases
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"aliases": aliases, "plan_path": str(plan_path)}
 
 
 def generation_context_matches_item(context_snapshot: dict, item: dict) -> bool:
@@ -3161,11 +3337,13 @@ def ensure_episode_breakdown(
             "raw": {"source": "episode_detail", "note": "当前章节还没有可同步的拆解结果。"},
         }
     plan_path = project_episode_plan_path(episode_number, project)
+    settings = db.list_setting_items(database_url(), project["slug"])
+    referenced_setting_ids = infer_referenced_setting_ids(episode_number, pages, settings)
     saved = db.upsert_chapter_breakdown(database_url(), project["slug"], episode_number, {
         "version": 1,
         "pages": pages,
         "panels": flatten_panels(pages),
-        "referenced_setting_ids": [],
+        "referenced_setting_ids": referenced_setting_ids,
         "prompt_version": str((plan or {}).get("prompt_version") or "legacy.page_plan.v1"),
         "model_name": str((plan or {}).get("model") or ""),
         "status": "draft_ready",
@@ -3469,6 +3647,7 @@ def approval_gate_states(health: dict, detail: dict, status: dict, approvals: di
     media = media_progress(detail)
     detail_episode = int(detail.get("episode_number") or 0) or episode_number_from_id(str(detail.get("episode_id") or ""))
     global_ready = global_asset_readiness(active_project())
+    chapter_coverage = chapter_asset_coverage(active_project(), detail_episode, detail.get("pages") or [])
     quality = generated_output_quality_status(active_project(), detail_episode)
     qa_ready = qa_report_ready(status)
     paths_ok = all(item.get("exists") for item in health.get("paths", {}).values())
@@ -3496,6 +3675,8 @@ def approval_gate_states(health: dict, detail: dict, status: dict, approvals: di
         assets_state = ("locked", "等待设定审核", global_ready["message"] or "请先审核小说设定库。")
     elif not global_ready["approved_assets"]:
         assets_state = ("review", "待确认", global_ready["message"] or "请先确认全局视觉素材。")
+    elif not chapter_coverage["ok"]:
+        assets_state = ("review", "本章素材不完整", chapter_coverage["message"])
     elif approvals.get("assets"):
         assets_state = ("done", "已通过", f"全局素材已确认：设定 {global_ready['approved_settings']} 条，素材 {global_ready['approved_assets']} 个。")
     else:
@@ -3558,9 +3739,13 @@ def assert_approval_allowed(episode_number: int, gate: str, approvals: dict) -> 
     if gate == "draft" and pending_close_reading_pages(detail):
         raise ValueError("当前章节仍有骨架页面，请先完成细读拆解，再通过拆解审核。")
     if gate == "assets":
-        readiness = global_asset_readiness(active_project())
+        project = active_project()
+        readiness = global_asset_readiness(project)
         if not readiness["ok"]:
             raise ValueError(readiness["message"] or "请先完成全局设定和素材审核，再确认素材。")
+        coverage = chapter_asset_coverage(project, episode_number, detail.get("pages") or [])
+        if not coverage["ok"]:
+            raise ValueError(coverage["message"] or "请先补齐本章核心角色、场景和道具素材。")
     if gate == "generation":
         if not approvals.get("draft") or not approvals.get("assets"):
             raise ValueError("请先通过章节细读审核和全局素材确认，再审核生成结果。")
@@ -3606,6 +3791,9 @@ def assert_stage_allowed(stage: str, episode_number: int) -> None:
             raise ValueError("请先完成 AI 拆解，再生成漫画。")
         if not approvals.get("draft") or not approvals.get("assets"):
             raise ValueError("生成漫画前必须先通过拆解审核和素材确认。")
+        coverage = chapter_asset_coverage(project, episode_number, detail.get("pages") or [])
+        if not coverage["ok"]:
+            raise ValueError(f"生成漫画前需要补齐本章核心素材：{coverage['message']}")
         blockers = generated_output_review_blockers(project, episode_number)
         if blockers.get("count"):
             raise ValueError(review_blocker_message(episode_number, blockers))
@@ -3677,6 +3865,7 @@ def agent_recommendation(
     blockers = generated_output_review_blockers(project, episode_number, ignored_review_page_id)
     qa_ready = qa_report_ready(status)
     global_ready = global_asset_readiness(project)
+    chapter_coverage = chapter_asset_coverage(project, episode_number, pages)
 
     if not pages:
         if not global_ready["approved_settings"]:
@@ -3753,6 +3942,17 @@ def agent_recommendation(
             "gate": "draft",
         }
     if not approvals.get("assets"):
+        if not chapter_coverage["ok"]:
+            return {
+                "state": "review",
+                "title": "先补齐本章核心素材",
+                "detail": chapter_coverage["message"],
+                "stage": "",
+                "action_label": "打开素材库",
+                "requires_approval": False,
+                "gate": "",
+                "target_module": "assets",
+            }
         return {
             "state": "review",
             "title": "等待人工确认全局素材",
@@ -3863,6 +4063,7 @@ def agent_inspect(episode_number: int) -> dict:
     media = media_progress(detail)
     project = active_project()
     global_ready = global_asset_readiness(project)
+    chapter_coverage = chapter_asset_coverage(project, episode_number, detail.get("pages") or [])
     checks = agent_health_findings(health)
     recommendation = agent_recommendation(episode_number, health, detail, status, approvals)
     return {
@@ -3889,6 +4090,10 @@ def agent_inspect(episode_number: int) -> dict:
             "global_assets_ready": global_ready["approved_assets"],
             "global_assets_ready_for_close_reading": global_ready["ok"],
             "global_assets_blocker": global_ready["message"],
+            "chapter_assets_required": chapter_coverage["required_count"],
+            "chapter_assets_covered": chapter_coverage["covered_count"],
+            "chapter_assets_ready": chapter_coverage["ok"],
+            "chapter_assets_blocker": chapter_coverage["message"],
             "close_reading_pending_pages": len(pending_close_reading_pages(detail)),
             "draft_exists": bool(detail.get("pages")),
             "qa_exists": qa_report_ready(status),
@@ -3987,6 +4192,15 @@ def restore_job_backup(job: dict) -> str:
 def complete_asset_regeneration(project: dict, job: dict) -> dict:
     target = Path(str(job.get("asset_path") or ""))
     if not target.is_file():
+        numbered_target = target.with_name(f"{target.stem}_00001_{target.suffix}")
+        if numbered_target.is_file():
+            target = numbered_target
+    if not target.is_file():
+        workflow = read_optional_json(Path(str(job.get("workflow_path") or ""))) or {}
+        generated_path = expected_output_from_workflow(workflow)
+        if generated_path and Path(generated_path).is_file():
+            target = Path(generated_path)
+    if not target.is_file():
         raise ValueError(f"素材生成任务已结束，但目标文件未生成：{target}")
     asset_id = int(job.get("asset_id") or 0)
     current = db.get_visual_asset(database_url(), asset_id) if asset_id else None
@@ -4079,7 +4293,10 @@ def assemble_page_for_panel(page_id: str) -> dict:
 
 
 def start_asset_regenerate_job(payload: dict) -> dict:
-    project = active_project()
+    requested_project_slug = str(payload.get("project_slug") or "").strip()
+    project = project_by_slug(requested_project_slug) if requested_project_slug else active_project()
+    if requested_project_slug and project.get("slug") != requested_project_slug:
+        raise ValueError("指定的小说项目不存在或已归档")
     asset_id = int(payload.get("asset_id") or 0)
     asset = db.get_visual_asset(database_url(), asset_id) if asset_id else None
     if asset_id and not asset:
@@ -4131,9 +4348,10 @@ def start_asset_regenerate_job(payload: dict) -> dict:
                 reference_path,
                 approved_prompt,
                 approved_negative_prompt,
+                project,
             )
         elif not workflow_path:
-            workflow_path = create_asset_workflow(alias, category, target, reference_path)
+            workflow_path = create_asset_workflow(alias, category, target, reference_path, project=project)
     except Exception:
         restore_asset_backup({
             "stage": "asset_regenerate",
@@ -4142,8 +4360,8 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         })
         raise
 
-    job_id = f"{int(time.time())}-asset-regenerate"
-    result_path = project_manifest_dir() / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{int(time.time())}.json"
+    job_id = f"{int(time.time() * 1000)}-{asset_id or safe_stem(alias)}-asset-regenerate"
+    result_path = project_manifest_dir(project) / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{int(time.time())}.json"
     cmd = [
         "powershell",
         "-ExecutionPolicy",
@@ -4183,6 +4401,7 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         "stderr_tail": "",
         "progress": job_progress_state(current="单素材重新生成"),
         "retry_payload": {
+            "project_slug": project["slug"],
             "episode_number": episode_number,
             "asset_alias": alias,
             "asset_id": int(asset.get("id") or 0) if asset else 0,
@@ -4199,6 +4418,189 @@ def start_asset_regenerate_job(payload: dict) -> dict:
     thread = threading.Thread(target=run_job, args=(job_id,), daemon=True)
     thread.start()
     return job
+
+
+def start_asset_batch_job(payload: dict) -> dict:
+    raw_ids = payload.get("asset_ids")
+    if not isinstance(raw_ids, list):
+        raise ValueError("asset_ids must be a list")
+    try:
+        asset_ids = list(dict.fromkeys(int(item) for item in raw_ids if int(item) > 0))
+    except (TypeError, ValueError):
+        raise ValueError("asset_ids 只能包含素材编号") from None
+    if not asset_ids:
+        raise ValueError("请至少选择 1 个可生成素材")
+    if len(asset_ids) > MAX_ASSET_BATCH_SIZE:
+        raise ValueError(f"单次最多选择 {MAX_ASSET_BATCH_SIZE} 个素材")
+
+    requested_project_slug = str(payload.get("project_slug") or "").strip()
+    project = project_by_slug(requested_project_slug) if requested_project_slug else active_project()
+    if requested_project_slug and project.get("slug") != requested_project_slug:
+        raise ValueError("指定的小说项目不存在或已归档")
+    assets = []
+    for asset_id in asset_ids:
+        asset = db.get_visual_asset(database_url(), asset_id)
+        if not asset:
+            raise ValueError(f"视觉素材不存在：{asset_id}")
+        if asset.get("project_slug") != project.get("slug"):
+            raise ValueError(f"素材不属于当前小说：{asset_id}")
+        assets.append(asset)
+
+    episode_number = int(payload.get("episode_number") or 1)
+    job_id = f"{int(time.time() * 1000)}-asset-batch"
+    job = {
+        "id": job_id,
+        "stage": "asset_batch",
+        "label": "批量生成视觉素材",
+        "project_slug": project["slug"],
+        "episode_number": episode_number,
+        "asset_ids": asset_ids,
+        "asset_labels": {str(item["id"]): item.get("title") or f"素材 {item['id']}" for item in assets},
+        "estimated_image_calls": len(asset_ids),
+        "status": "running",
+        "started": datetime.now().isoformat(timespec="seconds"),
+        "finished": "",
+        "result_path": "",
+        "exit_code": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "progress": job_progress_state(len(asset_ids), current="准备批量生成素材"),
+        "child_job_ids": [],
+        "completed_asset_ids": [],
+        "failed_asset_ids": [],
+        "retry_payload": {
+            "project_slug": project["slug"],
+            "episode_number": episode_number,
+            "asset_ids": asset_ids,
+        },
+        "retried_from": str(payload.get("retried_from") or ""),
+    }
+    with JOB_LOCK:
+        JOBS[job_id] = job
+    db.save_job(database_url(), project["slug"], job)
+    thread = threading.Thread(target=run_asset_batch_job, args=(job_id,), daemon=True)
+    thread.start()
+    return job
+
+
+def run_asset_batch_job(job_id: str) -> None:
+    with JOB_LOCK:
+        parent = dict(JOBS[job_id])
+    project = project_by_slug(parent.get("project_slug", ""))
+    completed_asset_ids = []
+    failed_asset_ids = []
+    failures = []
+
+    for asset_id in parent.get("asset_ids") or []:
+        with JOB_LOCK:
+            live_parent = JOBS[job_id]
+            if live_parent.get("status") == "cancelled":
+                return
+            label = (live_parent.get("asset_labels") or {}).get(str(asset_id)) or f"素材 {asset_id}"
+            live_parent["progress"] = job_progress_state(
+                len(parent.get("asset_ids") or []),
+                len(completed_asset_ids),
+                len(failed_asset_ids),
+                f"正在生成：{label}",
+            )
+            snapshot = dict(live_parent)
+        db.save_job(database_url(), project["slug"], snapshot)
+
+        child = None
+        try:
+            child = start_asset_regenerate_job({
+                "project_slug": project["slug"],
+                "episode_number": int(parent.get("episode_number") or 1),
+                "asset_id": asset_id,
+            })
+            child_id = str(child.get("id") or "")
+            with JOB_LOCK:
+                live_parent = JOBS[job_id]
+                live_parent.setdefault("child_job_ids", []).append(child_id)
+                live_parent["active_child_job_id"] = child_id
+            while True:
+                with JOB_LOCK:
+                    if JOBS[job_id].get("status") == "cancelled":
+                        return
+                    child_state = dict(JOBS.get(child_id) or child)
+                if str(child_state.get("status") or "") not in {"running", "queued", "starting"}:
+                    break
+                time.sleep(0.5)
+            if child_state.get("status") == "passed":
+                completed_asset_ids.append(asset_id)
+            else:
+                failed_asset_ids.append(asset_id)
+                diagnostics = child_state.get("diagnostics") or {}
+                failures.append({
+                    "asset_id": asset_id,
+                    "child_job_id": child_id,
+                    "message": diagnostics.get("title") or child_state.get("stderr_tail") or "素材生成失败",
+                })
+        except Exception as exc:
+            failed_asset_ids.append(asset_id)
+            failures.append({"asset_id": asset_id, "child_job_id": str((child or {}).get("id") or ""), "message": str(exc)})
+        finally:
+            with JOB_LOCK:
+                live_parent = JOBS[job_id]
+                live_parent["active_child_job_id"] = ""
+                live_parent["completed_asset_ids"] = list(completed_asset_ids)
+                live_parent["failed_asset_ids"] = list(failed_asset_ids)
+                live_parent["progress"] = job_progress_state(
+                    len(parent.get("asset_ids") or []),
+                    len(completed_asset_ids),
+                    len(failed_asset_ids),
+                    "继续下一项" if len(completed_asset_ids) + len(failed_asset_ids) < len(parent.get("asset_ids") or []) else "批量任务已结束",
+                )
+                snapshot = dict(live_parent)
+            db.save_job(database_url(), project["slug"], snapshot)
+
+    with JOB_LOCK:
+        live_parent = JOBS[job_id]
+        if live_parent.get("status") == "cancelled":
+            return
+        if failed_asset_ids and completed_asset_ids:
+            status = "partial"
+        elif failed_asset_ids:
+            status = "failed"
+        else:
+            status = "passed"
+        live_parent.update({
+            "status": status,
+            "finished": datetime.now().isoformat(timespec="seconds"),
+            "exit_code": 0 if not failed_asset_ids else 1,
+            "result": {
+                "ok": not failed_asset_ids,
+                "completed_asset_ids": list(completed_asset_ids),
+                "failed_asset_ids": list(failed_asset_ids),
+                "failures": failures,
+            },
+            "retry_payload": {
+                "project_slug": project["slug"],
+                "episode_number": int(parent.get("episode_number") or 1),
+                "asset_ids": list(failed_asset_ids or parent.get("asset_ids") or []),
+            },
+            "progress": job_progress_state(
+                len(parent.get("asset_ids") or []),
+                len(completed_asset_ids),
+                len(failed_asset_ids),
+                "全部生成完成" if not failed_asset_ids else "部分素材生成失败",
+                partial=bool(failed_asset_ids and completed_asset_ids),
+            ),
+        })
+        if failures:
+            live_parent["diagnostics"] = {
+                "domain": "asset_batch",
+                "title": f"{len(failed_asset_ids)} 个素材生成失败",
+                "issues": [{
+                    "type": "asset_generation_failed",
+                    "severity": "retryable",
+                    "message": item["message"],
+                    "action": "检查图片模型、额度和生成后端后重试失败项。",
+                    "retry_hint": "仅重试失败素材",
+                } for item in failures],
+            }
+        snapshot = dict(live_parent)
+    db.save_job(database_url(), project["slug"], snapshot)
 
 
 def start_regenerate_job(payload: dict) -> dict:
@@ -4470,9 +4872,15 @@ def cancel_job_api(job_id: str) -> dict:
             }],
             "waiting_reason": "task_cancelled",
         }
+        active_child_job_id = str(job.get("active_child_job_id") or "")
         snapshot = dict(job)
     if process:
         terminate_job_process(process)
+    if active_child_job_id:
+        try:
+            cancel_job_api(active_child_job_id)
+        except ValueError:
+            pass
     db.save_job(database_url(), snapshot.get("project_slug") or active_project_slug(), snapshot)
     return {"ok": True, "job": snapshot}
 
@@ -4495,6 +4903,27 @@ def retry_job_api(job_id: str) -> dict:
 
     payload = {**retry_payload, "retried_from": str(job_id)}
     stage = str(job.get("stage") or "")
+    if stage == "asset_regenerate" and int(job.get("exit_code") if job.get("exit_code") is not None else -1) == 0:
+        project = project_by_slug(project_slug) if project_slug else active_project()
+        try:
+            post_process = complete_asset_regeneration(project, job)
+        except ValueError:
+            pass
+        else:
+            repaired = {
+                **job,
+                "status": "passed",
+                "finished": datetime.now().isoformat(timespec="seconds"),
+                "exit_code": 0,
+                "result": {"ok": True, "reconciled": True, "post_process": post_process},
+                "post_process": post_process,
+                "diagnostics": {},
+                "progress": job_progress_state(completed=1, current="已同步生成结果"),
+            }
+            with JOB_LOCK:
+                JOBS[str(job_id)] = repaired
+            db.save_job(database_url(), project["slug"], repaired)
+            return repaired
     if stage == "process_novel":
         if payload.get("import_strategy") != "refresh_chapters":
             payload["import_strategy"] = "update"
@@ -4502,6 +4931,8 @@ def retry_job_api(job_id: str) -> dict:
     if stage == "setting_scan":
         payload["confirmed"] = True
         return start_setting_scan_job(project_slug or active_project()["slug"], payload)
+    if stage == "asset_batch":
+        return start_asset_batch_job(payload)
     if stage in {"asset_regenerate", "regenerate"}:
         return start_regenerate_job(payload)
     if stage == "regenerate_page":
@@ -7091,8 +7522,154 @@ def suggest_setting_candidates_from_instruction(project: dict, instruction: str,
     return [item for _, item in scored[: max(1, limit)]]
 
 
-def scan_setting_candidates(project: dict, limit: int = 80) -> list[dict]:
-    chapters = db.list_chapters(database_url(), project["slug"])
+def ai_discover_setting_candidates(project: dict, chapters: list[dict], limit: int = 40, progress_callback=None) -> tuple[list[dict], dict]:
+    supported_types = {"character", "location", "prop", "faction"}
+    chapter_rows = [
+        {
+            "chapter_number": int(chapter.get("chapter_number") or 0),
+            "chapter_title": str(chapter.get("title") or ""),
+            "text": chapter_setting_scan_text(chapter)[:2400],
+        }
+        for chapter in chapters
+        if chapter_setting_scan_text(chapter)
+    ]
+    batches = [chapter_rows[index:index + 8] for index in range(0, len(chapter_rows), 8)]
+    report = {"requested": True, "used_count": 0, "error_count": 0, "errors": [], "discovered_count": 0}
+    by_key: dict[tuple[str, str], dict] = {}
+    for batch_index, batch in enumerate(batches, start=1):
+        if len(by_key) >= limit:
+            break
+        if progress_callback:
+            progress_callback(batch_index - 1, len(batches), f"AI 发现候选：章节批次 {batch_index}/{len(batches)}")
+        try:
+            result = call_setting_prompt_model([
+                {
+                    "role": "system",
+                    "content": (
+                        "你是漫画改编的小说设定发现助手。只返回 JSON。"
+                        "仅提取正文明确出现且可复查的角色、地点、道具、组织，不得补写不存在的实体。"
+                        "名称必须是原文中的专名；角色需区分身份称谓与姓名；道具需具有跨镜头复用价值。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps({
+                        "project_title": project.get("title") or project.get("slug") or "当前小说",
+                        "chapters": batch,
+                        "remaining_limit": max(1, min(16, limit - len(by_key))),
+                        "required_schema": {
+                            "items": [{
+                                "item_type": "character|location|prop|faction",
+                                "name": "原文专名",
+                                "aliases": ["原文别名"],
+                                "description": "只基于正文的中文设定描述",
+                                "visual_prompt": "可直接用于漫画设定图的中文视觉提示词",
+                                "negative_prompt": "需要避免的视觉错误",
+                                "importance": "core|high|normal",
+                            }],
+                        },
+                    }, ensure_ascii=False),
+                },
+            ])
+            report["used_count"] += 1
+        except Exception as exc:
+            report["error_count"] += 1
+            report["errors"].append({"batch": batch_index, "error": str(exc)})
+            continue
+        for item in result.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("item_type") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if item_type not in supported_types or len(name) < 2 or len(name) > 40:
+                continue
+            aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+            terms = [name, *[str(alias).strip() for alias in aliases if str(alias).strip()]]
+            matched_chapters = []
+            evidence = []
+            mentions = 0
+            for chapter in chapters:
+                text = chapter_setting_scan_text(chapter)
+                matched = [term for term in terms if term and term in text]
+                if not matched:
+                    continue
+                number = int(chapter.get("chapter_number") or 0)
+                if number and number not in matched_chapters:
+                    matched_chapters.append(number)
+                mentions += sum(text.count(term) for term in matched)
+                if len(evidence) < 5:
+                    best_term = max(matched, key=lambda term: text.count(term))
+                    evidence.append({
+                        "type": "ai_discovery_verified_chapter_text",
+                        "chapter_number": number,
+                        "chapter_title": str(chapter.get("title") or ""),
+                        "matched_term": best_term,
+                        "text": character_context_snippet(text, best_term),
+                    })
+            if not evidence:
+                continue
+            importance = str(item.get("importance") or "normal").strip()
+            if importance not in {"core", "high", "normal"}:
+                importance = "core" if mentions >= 3 else "normal"
+            candidate = {
+                "item_type": item_type,
+                "name": name,
+                "aliases": terms[1:],
+                "description": str(item.get("description") or f"{name} 是正文中明确出现的{setting_type_label(item_type)}设定。"),
+                "first_chapter_number": min(matched_chapters) if matched_chapters else None,
+                "chapter_numbers": sorted(matched_chapters),
+                "visual_prompt": str(item.get("visual_prompt") or f"{name}，商业漫画{setting_type_label(item_type)}设定图，细节清晰，保持跨章节一致。"),
+                "negative_prompt": str(item.get("negative_prompt") or ASSET_NEGATIVE_PROMPT),
+                "relations": {},
+                "source_evidence": evidence,
+                "importance": importance,
+                "review_status": "pending_review",
+                "locked": False,
+                "raw": {
+                    "source": "ai_candidate_discovery",
+                    "scan_version": "settings.ai_discovery.v1",
+                    "ai_model": result.get("_model") or "",
+                    "mentions": mentions,
+                },
+            }
+            key = setting_identity(candidate)
+            existing = by_key.get(key)
+            if not existing:
+                by_key[key] = candidate
+                continue
+            existing["chapter_numbers"] = sorted(set(existing.get("chapter_numbers") or []) | set(candidate["chapter_numbers"]))
+            existing["source_evidence"] = (existing.get("source_evidence") or []) + [
+                row for row in candidate["source_evidence"]
+                if row not in (existing.get("source_evidence") or [])
+            ]
+        if progress_callback:
+            progress_callback(batch_index, len(batches), f"已发现 {len(by_key)} 条正文候选")
+    candidates = list(by_key.values())[:max(0, limit)]
+    report["discovered_count"] = len(candidates)
+    return candidates, report
+
+
+def merge_setting_candidates(existing: list[dict], discovered: list[dict], limit: int) -> list[dict]:
+    merged = list(existing)
+    positions = {setting_identity(item): index for index, item in enumerate(merged)}
+    for item in discovered:
+        key = setting_identity(item)
+        if key in positions:
+            current = merged[positions[key]]
+            merged[positions[key]] = {
+                **current,
+                **item,
+                "source_evidence": item.get("source_evidence") or current.get("source_evidence") or [],
+                "raw": {**(current.get("raw") or {}), **(item.get("raw") or {})},
+            }
+        elif len(merged) < limit:
+            positions[key] = len(merged)
+            merged.append(item)
+    return merged[:limit]
+
+
+def scan_setting_candidates(project: dict, limit: int = 80, chapters: list[dict] | None = None) -> list[dict]:
+    chapters = chapters if chapters is not None else db.list_chapters(database_url(), project["slug"])
     volume_map: dict[str, list[dict]] = {}
     for chapter in chapters:
         volume = str(chapter.get("volume") or "").strip()
@@ -7176,6 +7753,11 @@ def ai_enhance_setting_scan_candidates(project: dict, candidates: list[dict], li
     scoped_candidates = candidates[:max(0, limit)]
     total = len(scoped_candidates)
     for index, candidate in enumerate(scoped_candidates, start=1):
+        if (candidate.get("raw") or {}).get("source") == "ai_candidate_discovery":
+            output.append(candidate)
+            if progress_callback:
+                progress_callback(index, total, f"已验证：{candidate.get('name') or f'候选 {index}'}")
+            continue
         if progress_callback:
             progress_callback(index - 1, total, f"AI 增强：{candidate.get('name') or f'候选 {index}'}")
         setting = {
@@ -7230,7 +7812,8 @@ def scan_settings_api(slug: str, payload: dict, progress_callback=None) -> dict:
     limit = int(payload.get("limit") or 80)
     extraction_mode = setting_scan_extraction_mode(payload.get("extraction_mode"))
     existing = db.list_setting_items(database_url(), project["slug"])
-    candidates = scan_setting_candidates(project, limit=max(2, limit))
+    chapters = db.list_chapters(database_url(), project["slug"])
+    candidates = scan_setting_candidates(project, limit=max(2, limit), chapters=chapters)
     enhancement = {
         "requested": extraction_mode == "ai",
         "used_count": 0,
@@ -7238,7 +7821,22 @@ def scan_settings_api(slug: str, payload: dict, progress_callback=None) -> dict:
         "errors": [],
     }
     if extraction_mode == "ai":
-        candidates, enhancement = ai_enhance_setting_scan_candidates(project, candidates, limit=max(2, limit), progress_callback=progress_callback)
+        discovered, discovery = ai_discover_setting_candidates(
+            project,
+            chapters,
+            limit=max(0, max(2, limit) - len(candidates)),
+            progress_callback=progress_callback,
+        )
+        candidates = merge_setting_candidates(candidates, discovered, max(2, limit))
+        candidates, item_enhancement = ai_enhance_setting_scan_candidates(project, candidates, limit=max(2, limit), progress_callback=progress_callback)
+        enhancement = {
+            "requested": True,
+            "used_count": int(discovery.get("used_count") or 0) + int(item_enhancement.get("used_count") or 0),
+            "error_count": int(discovery.get("error_count") or 0) + int(item_enhancement.get("error_count") or 0),
+            "errors": [*(discovery.get("errors") or []), *(item_enhancement.get("errors") or [])],
+            "discovered_count": int(discovery.get("discovered_count") or 0),
+            "discovery_calls": int(discovery.get("used_count") or 0),
+        }
     saved = []
     for item in candidates:
         saved.append(db.upsert_setting_item(database_url(), project["slug"], item))
@@ -7584,9 +8182,16 @@ def update_breakdown_api(breakdown_id: int, payload: dict) -> dict:
         edited_plan = apply_breakdown_page_edits(plan, page_edits)
         plan_path.write_text(json.dumps(edited_plan, ensure_ascii=False, indent=2), encoding="utf-8")
         edited_breakdown = apply_breakdown_page_edits({"pages": before.get("pages") or []}, page_edits)
+        settings = db.list_setting_items(database_url(), before["project_slug"])
         updates.update({
             "pages": edited_breakdown["pages"],
             "panels": flatten_panels(edited_breakdown["pages"]),
+            "referenced_setting_ids": infer_referenced_setting_ids(
+                int(before.get("chapter_number") or 0),
+                edited_breakdown["pages"],
+                settings,
+                before.get("referenced_setting_ids") or [],
+            ),
             "status": "close_reading_refined_needs_review",
             "review_status": "pending_review",
         })
@@ -7700,6 +8305,488 @@ def review_breakdown_api(breakdown_id: int, payload: dict) -> dict:
                 validate=False,
             )
     return {"ok": True, "breakdown": saved, "approvals": approvals}
+
+
+def validate_backup_member_name(name: str) -> str:
+    value = str(name or "")
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or value.startswith("/")
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(":" in part for part in path.parts)
+    ):
+        raise ValueError(f"备份包含不安全路径：{value}")
+    return path.as_posix()
+
+
+def backup_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def project_backup_data(slug: str) -> dict:
+    project = db.get_project(database_url(), slug)
+    if not project:
+        raise ValueError("小说项目不存在")
+    approvals = db.execute(
+        database_url(),
+        """
+        SELECT project_slug, episode_number, draft, assets, generation, qa, next_episode,
+               raw, updated_at::text AS updated
+        FROM comic_episode_approvals WHERE project_slug = %s ORDER BY episode_number
+        """,
+        (slug,),
+        fetch="all",
+    )
+    job_rows = db.execute(
+        database_url(),
+        """
+        SELECT job_id, project_slug, stage, label, status, result_path,
+               raw, started_at::text AS started_at, finished_at::text AS finished_at
+        FROM comic_jobs WHERE project_slug = %s ORDER BY started_at
+        """,
+        (slug,),
+        fetch="all",
+    )
+    jobs = []
+    for row in job_rows:
+        raw = dict(row.get("raw") or {})
+        raw.setdefault("id", row.get("job_id") or "")
+        raw.setdefault("project_slug", slug)
+        raw.setdefault("stage", row.get("stage") or "")
+        raw.setdefault("label", row.get("label") or "")
+        raw.setdefault("status", row.get("status") or "")
+        raw.setdefault("result_path", row.get("result_path") or "")
+        raw.setdefault("started", row.get("started_at") or "")
+        raw.setdefault("finished", row.get("finished_at") or "")
+        jobs.append(raw)
+    reviews = db.execute(
+        database_url(),
+        """
+        SELECT id, project_slug, target_type, target_id, action, comment,
+               before_data, after_data, created_at::text
+        FROM comic_reviews WHERE project_slug = %s ORDER BY id
+        """,
+        (slug,),
+        fetch="all",
+    )
+    return {
+        "project": project,
+        "chapters": db.list_chapters(database_url(), slug),
+        "episodes": db.list_episodes(database_url(), slug),
+        "approvals": approvals,
+        "jobs": jobs,
+        "settings": db.list_setting_items(database_url(), slug),
+        "breakdowns": db.list_chapter_breakdowns(database_url(), slug),
+        "assets": db.list_visual_assets(database_url(), slug),
+        "outputs": db.list_generated_outputs(database_url(), slug),
+        "versions": db.list_output_versions(database_url(), slug),
+        "reviews": reviews,
+    }
+
+
+def create_project_backup_archive(slug: str, include_media: bool = False) -> dict:
+    data = project_backup_data(slug)
+    project = data["project"]
+    source_slug = project["slug"]
+    file_specs: list[dict] = []
+    by_source: dict[str, dict] = {}
+
+    def add_file(source_value: str, archive_name: str, kind: str, reference: dict | None = None) -> None:
+        source = Path(str(source_value or ""))
+        if not source.is_file():
+            return
+        resolved = str(source.resolve())
+        spec = by_source.get(resolved)
+        if not spec:
+            normalized = validate_backup_member_name(archive_name)
+            spec = {"source": source, "archive_path": normalized, "kind": kind, "references": []}
+            by_source[resolved] = spec
+            file_specs.append(spec)
+        if reference and reference not in spec["references"]:
+            spec["references"].append(reference)
+
+    manifest_root = Path(str(project.get("manifest_dir") or ""))
+    if manifest_root.is_dir():
+        for path in sorted(item for item in manifest_root.rglob("*") if item.is_file()):
+            relative = path.relative_to(manifest_root).as_posix()
+            add_file(str(path), f"files/manifests/{relative}", "manifest")
+
+    novel_path = Path(str(project.get("novel_path") or ""))
+    add_file(
+        str(novel_path),
+        f"files/novel/{safe_stem(novel_path.stem)}{novel_path.suffix.lower() or '.txt'}",
+        "novel",
+        {"table": "project", "id": source_slug, "field": "novel_path"},
+    )
+
+    def add_referenced_file(table: str, row_id, field: str, source_value: str, kind: str, fallback_name: str) -> None:
+        source = Path(str(source_value or ""))
+        if not source.is_file():
+            return
+        archive_name = fallback_name
+        if manifest_root.is_dir():
+            try:
+                archive_name = f"files/manifests/{source.resolve().relative_to(manifest_root.resolve()).as_posix()}"
+            except ValueError:
+                pass
+        add_file(str(source), archive_name, kind, {"table": table, "id": row_id, "field": field})
+
+    add_referenced_file("project", source_slug, "chapter_index_path", project.get("chapter_index_path", ""), "manifest", "files/project/chapter_index.json")
+    add_referenced_file("project", source_slug, "series_plan_path", project.get("series_plan_path", ""), "manifest", "files/project/series_plan.json")
+    for episode in data["episodes"]:
+        number = int(episode.get("episode_number") or 0)
+        add_referenced_file("episodes", number, "episode_plan_path", episode.get("episode_plan_path", ""), "manifest", f"files/project/episodes/{number:04d}.json")
+    for job in data["jobs"]:
+        job_id = str(job.get("id") or "")
+        for field in ("result_path", "generation_context_path"):
+            add_referenced_file("jobs", job_id, field, job.get(field, ""), "manifest", f"files/project/jobs/{safe_stem(job_id)}_{field}.json")
+
+    if include_media:
+        media_groups = [
+            ("assets", data["assets"], ("file_path", "thumbnail_path")),
+            ("outputs", data["outputs"], ("file_path", "thumbnail_path")),
+            ("versions", data["versions"], ("file_path", "thumbnail_path")),
+        ]
+        for table, rows, fields in media_groups:
+            for row in rows:
+                row_id = row.get("id")
+                for field in fields:
+                    source = Path(str(row.get(field) or ""))
+                    if source.is_file():
+                        add_file(
+                            str(source),
+                            f"files/media/{table}/{row_id}/{safe_stem(source.stem)}{source.suffix.lower()}",
+                            "media",
+                            {"table": table, "id": row_id, "field": field},
+                        )
+
+    if len(file_specs) > MAX_BACKUP_FILES:
+        raise ValueError(f"备份文件数量超过上限：{MAX_BACKUP_FILES}")
+    data_bytes = json.dumps(data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+    checksums = {"data.json": hashlib.sha256(data_bytes).hexdigest()}
+    files = []
+    total_file_bytes = 0
+    for spec in file_specs:
+        size = spec["source"].stat().st_size
+        total_file_bytes += size
+        checksum = backup_sha256(spec["source"])
+        checksums[spec["archive_path"]] = checksum
+        files.append({
+            "archive_path": spec["archive_path"],
+            "kind": spec["kind"],
+            "size": size,
+            "sha256": checksum,
+            "references": spec["references"],
+        })
+    manifest = {
+        "schema_version": 1,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "source_project": {"slug": source_slug, "title": project.get("title") or source_slug},
+        "include_media": bool(include_media),
+        "record_counts": {key: len(value) for key, value in data.items() if isinstance(value, list)},
+        "file_count": len(files),
+        "file_bytes": total_file_bytes,
+        "checksums": checksums,
+        "files": files,
+    }
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{safe_stem(source_slug)}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    target = BACKUPS_DIR / filename
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        archive.writestr("data.json", data_bytes)
+        for spec in file_specs:
+            archive.write(spec["source"], spec["archive_path"])
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+    return {
+        "ok": True,
+        "filename": filename,
+        "path": str(target),
+        "download_url": f"/backup-files/{quote(filename)}",
+        "size": target.stat().st_size,
+        "manifest": manifest,
+    }
+
+
+def read_project_backup_archive(raw: bytes) -> dict:
+    if not raw:
+        raise ValueError("备份文件为空")
+    if len(raw) > MAX_BACKUP_ARCHIVE_BYTES:
+        raise ValueError("备份文件超过 512MB 上传上限")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw), "r")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("备份文件不是有效的 ZIP 归档") from exc
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_BACKUP_FILES:
+            raise ValueError(f"备份文件数量超过上限：{MAX_BACKUP_FILES}")
+        total_size = 0
+        names = set()
+        for info in infos:
+            name = validate_backup_member_name(info.filename)
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError(f"备份不允许符号链接：{name}")
+            total_size += int(info.file_size or 0)
+            if total_size > MAX_BACKUP_EXPANDED_BYTES:
+                raise ValueError("备份解压后超过 2GB 安全上限")
+            names.add(name)
+        if "manifest.json" not in names or "data.json" not in names:
+            raise ValueError("备份缺少 manifest.json 或 data.json")
+        try:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            data = json.loads(archive.read("data.json").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("备份元数据不是有效的 UTF-8 JSON") from exc
+        if int(manifest.get("schema_version") or 0) != 1:
+            raise ValueError("不支持的备份 schema 版本")
+        checksums = manifest.get("checksums")
+        if not isinstance(checksums, dict):
+            raise ValueError("备份缺少校验和清单")
+        expected_members = names - {"manifest.json"}
+        if set(checksums) != expected_members:
+            raise ValueError("备份校验和清单与文件列表不一致")
+        for name, expected in checksums.items():
+            digest = hashlib.sha256()
+            with archive.open(name) as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != str(expected):
+                raise ValueError(f"备份文件校验和不一致：{name}")
+        listed_files = manifest.get("files")
+        if not isinstance(listed_files, list):
+            raise ValueError("备份文件映射格式无效")
+        for item in listed_files:
+            archive_path = validate_backup_member_name(item.get("archive_path", ""))
+            if archive_path not in names or archive_path not in checksums:
+                raise ValueError(f"备份文件映射缺少成员：{archive_path}")
+        return {"manifest": manifest, "data": data, "raw": raw}
+
+
+def decode_backup_upload(content_base64: str) -> bytes:
+    value = str(content_base64 or "")
+    if "," in value and value.lstrip().startswith("data:"):
+        value = value.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise ValueError("备份文件内容不是有效的 base64 数据") from exc
+    if len(raw) > MAX_BACKUP_ARCHIVE_BYTES:
+        raise ValueError("备份文件超过 512MB 上传上限")
+    return raw
+
+
+def import_project_backup_api(payload: dict) -> dict:
+    requested_slug = str(payload.get("target_slug") or "").strip()
+    if not requested_slug:
+        raise ValueError("请输入新项目标识")
+    target_slug = slugify(requested_slug)
+    if db.get_project(database_url(), target_slug):
+        raise ValueError(f"项目标识已存在：{target_slug}，导入不会覆盖已有项目")
+
+    parsed = read_project_backup_archive(decode_backup_upload(payload.get("content_base64") or ""))
+    manifest = parsed["manifest"]
+    data = parsed["data"]
+    source_project = data.get("project") if isinstance(data.get("project"), dict) else {}
+    source_slug = str(source_project.get("slug") or (manifest.get("source_project") or {}).get("slug") or "")
+    if not source_slug:
+        raise ValueError("备份缺少源项目标识")
+    target_title = str(payload.get("target_title") or f"{source_project.get('title') or source_slug}（导入）").strip()
+    target_manifest_dir = PROJECT_MANIFESTS_ROOT / target_slug
+    target_output_dir = Path(runtime_config().get("COMIC_PIPELINE_OUTPUT_ROOT") or (ROOT / "output")) / "Imported" / target_slug
+    archive_targets: dict[str, Path] = {}
+    novel_targets = []
+    for item in manifest.get("files") or []:
+        archive_path = validate_backup_member_name(item.get("archive_path", ""))
+        relative = PurePosixPath(archive_path)
+        if archive_path.startswith("files/novel/"):
+            suffix = Path(relative.name).suffix.lower() or ".txt"
+            target = NOVELS_DIR / f"{target_slug}{suffix}"
+            novel_targets.append(target)
+        elif archive_path.startswith("files/manifests/"):
+            target = target_manifest_dir.joinpath(*relative.parts[2:])
+        elif archive_path.startswith("files/project/"):
+            target = target_manifest_dir.joinpath("supplemental", *relative.parts[2:])
+        elif archive_path.startswith("files/media/"):
+            target = target_output_dir.joinpath(*relative.parts[2:])
+        else:
+            raise ValueError(f"备份包含未知文件区域：{archive_path}")
+        archive_targets[archive_path] = target
+    if len(set(novel_targets)) != 1:
+        raise ValueError("备份必须包含且只能包含一个小说源文件")
+    if target_manifest_dir.exists() or target_output_dir.exists() or novel_targets[0].exists():
+        raise ValueError("目标项目目录已存在，导入不会覆盖现有文件")
+
+    references = {}
+    for item in manifest.get("files") or []:
+        archive_path = item["archive_path"]
+        target = archive_targets[archive_path]
+        for reference in item.get("references") or []:
+            key = (str(reference.get("table") or ""), str(reference.get("id") or ""), str(reference.get("field") or ""))
+            references[key] = str(target)
+
+    def referenced_path(table: str, row_id, field: str, fallback: str = "") -> str:
+        return references.get((table, str(row_id), field), fallback)
+
+    written_files = []
+    created_project = False
+    try:
+        with zipfile.ZipFile(io.BytesIO(parsed["raw"]), "r") as archive:
+            for archive_path, target in archive_targets.items():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(archive_path) as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, 1024 * 1024)
+                written_files.append(target)
+
+        project = db.upsert_project(database_url(), {
+            "slug": target_slug,
+            "title": target_title,
+            "novel_path": referenced_path("project", source_slug, "novel_path", str(novel_targets[0])),
+            "manifest_dir": str(target_manifest_dir),
+            "chapter_index_path": referenced_path("project", source_slug, "chapter_index_path", str(target_manifest_dir / f"{target_slug}_chapter_index.json")),
+            "series_plan_path": referenced_path("project", source_slug, "series_plan_path", str(target_manifest_dir / f"{target_slug}_comic_series_plan.json")),
+            "legacy": False,
+            "status": "active",
+            "project_config": source_project.get("project_config") if isinstance(source_project.get("project_config"), dict) else {},
+        })
+        created_project = True
+
+        chapters = []
+        for row in data.get("chapters") or []:
+            chapters.append({
+                **(row.get("raw") or {}),
+                "volume": row.get("volume") or "",
+                "title": row.get("title") or "",
+                "line_number": int(row.get("line_number") or 1),
+            })
+        db.replace_project_chapters(database_url(), target_slug, chapters)
+        episodes = []
+        for row in data.get("episodes") or []:
+            number = int(row.get("episode_number") or 0)
+            episodes.append({
+                **(row.get("raw") or {}),
+                "episode_id": row.get("episode_code") or f"EP{number:03d}",
+                "chapter_title": row.get("title") or "",
+                "status": row.get("status") or "needs_close_reading",
+                "planned_pages": int(row.get("planned_pages") or 0),
+                "planned_panels": int(row.get("planned_panels") or 0),
+                "episode_plan_path": referenced_path("episodes", number, "episode_plan_path", ""),
+            })
+        db.replace_project_episodes(database_url(), target_slug, episodes)
+
+        job_id_map = {
+            str(row.get("id") or row.get("job_id") or ""): f"import-{target_slug}-{safe_stem(str(row.get('id') or row.get('job_id') or 'job'))}"
+            for row in data.get("jobs") or []
+        }
+        setting_id_map = {}
+        for row in data.get("settings") or []:
+            old_id = int(row.get("id") or 0)
+            saved = db.upsert_setting_item(database_url(), target_slug, {**row, "project_slug": target_slug})
+            setting_id_map[old_id] = int(saved["id"])
+        breakdown_id_map = {}
+        for row in data.get("breakdowns") or []:
+            old_id = int(row.get("id") or 0)
+            saved = db.upsert_chapter_breakdown(database_url(), target_slug, int(row.get("chapter_number") or 0), {
+                **row,
+                "referenced_setting_ids": [setting_id_map.get(int(item), int(item)) for item in (row.get("referenced_setting_ids") or [])],
+            })
+            breakdown_id_map[old_id] = int(saved["id"])
+        asset_id_map = {}
+        for row in data.get("assets") or []:
+            old_id = int(row.get("id") or 0)
+            saved = db.upsert_visual_asset(database_url(), target_slug, {
+                **row,
+                "setting_item_id": setting_id_map.get(int(row.get("setting_item_id") or 0)) or None,
+                "file_path": referenced_path("assets", old_id, "file_path", f"missing://{target_slug}/assets/{old_id}"),
+                "thumbnail_path": referenced_path("assets", old_id, "thumbnail_path", ""),
+                "source_job_id": job_id_map.get(str(row.get("source_job_id") or ""), ""),
+            })
+            asset_id_map[old_id] = int(saved["id"])
+        output_id_map = {}
+        for row in data.get("outputs") or []:
+            old_id = int(row.get("id") or 0)
+            saved = db.upsert_generated_output(database_url(), target_slug, {
+                **row,
+                "job_id": job_id_map.get(str(row.get("job_id") or ""), ""),
+                "file_path": referenced_path("outputs", old_id, "file_path", f"missing://{target_slug}/outputs/{old_id}"),
+                "thumbnail_path": referenced_path("outputs", old_id, "thumbnail_path", ""),
+            })
+            output_id_map[old_id] = int(saved["id"])
+        for row in data.get("versions") or []:
+            old_id = int(row.get("id") or 0)
+            db.add_output_version(database_url(), target_slug, {
+                **row,
+                "output_id": output_id_map.get(int(row.get("output_id") or 0)) or None,
+                "file_path": referenced_path("versions", old_id, "file_path", f"missing://{target_slug}/versions/{old_id}"),
+                "thumbnail_path": referenced_path("versions", old_id, "thumbnail_path", ""),
+                "source_job_id": job_id_map.get(str(row.get("source_job_id") or ""), ""),
+            })
+        for row in data.get("approvals") or []:
+            raw = dict(row.get("raw") or {})
+            raw.update({key: bool(row.get(key)) for key in ("draft", "assets", "generation", "qa", "next_episode")})
+            db.save_approvals(database_url(), target_slug, int(row.get("episode_number") or 0), raw)
+        for row in data.get("jobs") or []:
+            old_id = str(row.get("id") or row.get("job_id") or "")
+            imported = {
+                **row,
+                "id": job_id_map[old_id],
+                "project_slug": target_slug,
+                "status": "interrupted" if row.get("status") in {"running", "queued", "starting"} else row.get("status", "interrupted"),
+                "result_path": referenced_path("jobs", old_id, "result_path", ""),
+                "generation_context_path": referenced_path("jobs", old_id, "generation_context_path", ""),
+                "command": [],
+                "retry_payload": {},
+                "imported_from_job_id": old_id,
+            }
+            db.save_job(database_url(), target_slug, imported)
+
+        review_maps = {
+            "setting": setting_id_map,
+            "setting_item": setting_id_map,
+            "visual_asset": asset_id_map,
+            "chapter_breakdown": breakdown_id_map,
+            "generated_output": output_id_map,
+        }
+        for row in data.get("reviews") or []:
+            target_type = str(row.get("target_type") or "")
+            target_id = str(row.get("target_id") or "")
+            if target_type in review_maps and target_id.isdigit():
+                target_id = str(review_maps[target_type].get(int(target_id), target_id))
+            db.add_review(database_url(), target_slug, {
+                **row,
+                "target_id": target_id,
+                "comment": row.get("comment") or "",
+            })
+        return {
+            "ok": True,
+            "project": project,
+            "source_project": manifest.get("source_project") or {},
+            "include_media": bool(manifest.get("include_media")),
+            "record_counts": manifest.get("record_counts") or {},
+            "file_count": len(written_files),
+            "message": f"备份已导入为《{target_title}》，项目标识：{target_slug}",
+        }
+    except Exception:
+        if created_project:
+            db.execute(database_url(), "DELETE FROM comic_jobs WHERE project_slug = %s", (target_slug,))
+            db.execute(database_url(), "DELETE FROM comic_projects WHERE slug = %s", (target_slug,))
+        for root in (target_manifest_dir, target_output_dir):
+            if root.exists():
+                shutil.rmtree(root)
+        for novel_target in novel_targets:
+            if novel_target.is_file():
+                novel_target.unlink()
+        raise
+
+
+def export_project_backup_api(slug: str, payload: dict) -> dict:
+    return create_project_backup_archive(slug, bool(payload.get("include_media")))
 
 
 def set_active_project(payload: dict) -> dict:
@@ -8046,6 +9133,8 @@ def start_job(payload: dict) -> dict:
     generation_context = build_generation_context_snapshot(project, episode_number) if stage in {"generate", "close_reading"} else {}
     if stage == "close_reading":
         generation_context = add_close_reading_protection_context(project, episode_number, generation_context)
+    if stage == "generate":
+        hydrate_episode_asset_aliases(project, episode_number, generation_context)
     generation_context_path = write_generation_context_file(generation_context, job_id) if stage in {"generate", "close_reading"} else ""
     if STAGE_MAP[stage].get("custom") == "close_reading":
         cmd = [
@@ -8289,7 +9378,12 @@ def run_job(job_id: str) -> None:
                 breakdown = db.update_chapter_breakdown(database_url(), int(breakdown["id"]), {
                     "pages": breakdown.get("pages") or [],
                     "panels": breakdown.get("panels") or [],
-                    "referenced_setting_ids": breakdown.get("referenced_setting_ids") or [],
+                    "referenced_setting_ids": infer_referenced_setting_ids(
+                        episode_number,
+                        breakdown.get("pages") or [],
+                        db.list_setting_items(database_url(), project["slug"]),
+                        breakdown.get("referenced_setting_ids") or [],
+                    ),
                     "prompt_version": "close_reading.v1",
                     "model_name": (result or {}).get("model", ""),
                     "status": "close_reading_refined_needs_review",
@@ -8537,6 +9631,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/static/"):
             rel = parsed.path.removeprefix("/static/").strip("/")
             return self.serve_static(rel)
+        if parsed.path.startswith("/backup-files/"):
+            rel = unquote(parsed.path.removeprefix("/backup-files/").strip("/"))
+            return self.serve_backup(rel)
         if parsed.path.startswith("/media/"):
             rel = unquote(parsed.path.removeprefix("/media/").strip("/"))
             return self.serve_media(rel)
@@ -8640,6 +9737,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(preview_novel_import(payload))
             if parsed.path == "/api/assets/sync":
                 return self.send_json(sync_assets_api(payload), status=201)
+            if parsed.path == "/api/assets/generate-batch":
+                return self.send_json(start_asset_batch_job(payload), status=202)
             if parsed.path == "/api/outputs/sync":
                 return self.send_json(sync_outputs_api(payload), status=201)
             if parsed.path == "/api/outputs/review-batch":
@@ -8678,10 +9777,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(review_breakdown_api(int(parts[0]), payload))
             if parsed.path == "/api/projects/active":
                 return self.send_json(set_active_project(payload))
+            if parsed.path == "/api/projects/import-backup":
+                return self.send_json(import_project_backup_api(payload), status=201)
             if parsed.path.startswith("/api/projects/"):
                 parts = [unquote(item) for item in parsed.path.removeprefix("/api/projects/").strip("/").split("/") if item]
                 if len(parts) == 2 and parts[1] == "archive":
                     return self.send_json(archive_project_api(parts[0], payload))
+                if len(parts) == 2 and parts[1] == "backup":
+                    return self.send_json(export_project_backup_api(parts[0], payload), status=201)
             if parsed.path == "/api/process-novel":
                 return self.send_json(start_process_novel_job(payload), status=202)
             if parsed.path == "/api/run":
@@ -8737,6 +9840,16 @@ class Handler(BaseHTTPRequestHandler):
         elif target.suffix == ".html":
             content_type = "text/html; charset=utf-8"
         return self.serve_file(target, content_type)
+
+    def serve_backup(self, rel: str):
+        target = (BACKUPS_DIR / rel).resolve()
+        try:
+            target.relative_to(BACKUPS_DIR.resolve())
+        except ValueError:
+            return self.not_found()
+        if target.suffix.lower() != ".zip":
+            return self.not_found()
+        return self.serve_file(target, "application/zip")
 
     def serve_media(self, rel: str):
         root = comfy_output_root().resolve()

@@ -22,7 +22,7 @@ def main() -> int:
     episode = read_json(episode_path)
     pages = []
     for page in episode.get("pages", []):
-        pages.append(build_page_status(page))
+        pages.append(build_page_status(page, episode_path.parent))
 
     status = {
         "updated": datetime.now().isoformat(timespec="seconds"),
@@ -41,24 +41,24 @@ def main() -> int:
     return 0
 
 
-def build_page_status(page: dict) -> dict:
+def build_page_status(page: dict, manifest_root: Path) -> dict:
     page_id = page.get("page_id", "")
-    plan_path = Path(page.get("plan") or WORKSPACE / "manifests" / f"{page_id.lower()}_plan.json")
+    plan_path = Path(page.get("plan") or manifest_root / f"{page_id.lower()}_plan.json")
     workflow_path = first_existing(
-        WORKSPACE / "manifests" / f"{page_id.lower()}_workflows.json",
-        WORKSPACE / "manifests" / f"{page_id.lower().replace('_p001', '_page01')}_workflows.json",
+        manifest_root / f"{page_id.lower()}_workflows.json",
+        manifest_root / f"{page_id.lower().replace('_p001', '_page01')}_workflows.json",
     )
     fallback_workflow_path = first_existing(
-        WORKSPACE / "manifests" / f"{page_id.lower()}_fallback_workflows.json",
-        WORKSPACE / "manifests" / f"{page_id.lower().replace('_p001', '_page01')}_fallback_workflows.json",
+        manifest_root / f"{page_id.lower()}_fallback_workflows.json",
+        manifest_root / f"{page_id.lower().replace('_p001', '_page01')}_fallback_workflows.json",
     )
     micro_fallback_workflow_path = first_existing(
-        WORKSPACE / "manifests" / f"{page_id.lower()}_micro_fallback_workflows.json",
-        WORKSPACE / "manifests" / f"{page_id.lower().replace('_p001', '_page01')}_micro_fallback_workflows.json",
+        manifest_root / f"{page_id.lower()}_micro_fallback_workflows.json",
+        manifest_root / f"{page_id.lower().replace('_p001', '_page01')}_micro_fallback_workflows.json",
     )
     assembly_path = first_existing(
-        WORKSPACE / "manifests" / f"{page_id.lower()}_assembly.json",
-        WORKSPACE / "manifests" / f"{page_id.lower().replace('_p001', '_page01')}_assembly.json",
+        manifest_root / f"{page_id.lower()}_assembly.json",
+        manifest_root / f"{page_id.lower().replace('_p001', '_page01')}_assembly.json",
     )
     page_image = OUTPUT_ROOT / "pages" / f"{page_id}.png"
     review_markdown = OUTPUT_ROOT / "review_packages" / page_id / "human_review.md"

@@ -22,6 +22,12 @@ if (-not (Test-Path -LiteralPath $KeyPath)) {
     throw "Key file not found: $KeyPath"
 }
 
+$comfyKeyDir = Join-Path $comicConfig.ComfyRoot ".comic-pipeline"
+$comfyKeyPath = Join-Path $comfyKeyDir "image.env"
+New-Item -ItemType Directory -Path $comfyKeyDir -Force | Out-Null
+Copy-Item -LiteralPath $KeyPath -Destination $comfyKeyPath -Force
+$workflowKeyPath = ".comic-pipeline/image.env"
+
 $keyText = Get-Content -LiteralPath $KeyPath -Raw -Encoding UTF8
 $baseUrl = [regex]::Match($keyText, '"baseURL"\s*:\s*"([^"]+)"').Groups[1].Value
 if (-not $baseUrl) {
@@ -43,7 +49,7 @@ foreach ($node in $workflow.prompt.PSObject.Properties.Value) {
         if ($node.inputs.PSObject.Properties.Name -contains "api_key") {
             $node.inputs.PSObject.Properties.Remove("api_key")
         }
-        $node.inputs | Add-Member -NotePropertyName "api_key_env_path" -NotePropertyValue $KeyPath -Force
+        $node.inputs | Add-Member -NotePropertyName "api_key_env_path" -NotePropertyValue $workflowKeyPath -Force
     }
 }
 

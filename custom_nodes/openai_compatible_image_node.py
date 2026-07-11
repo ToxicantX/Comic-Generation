@@ -23,6 +23,7 @@ class OpenAICompatibleImageGenerate:
                 "api_key": ("STRING", {"multiline": False, "default": ""}),
                 "base_url": ("STRING", {"default": ""}),
                 "api_key_env_path": ("STRING", {"multiline": False, "default": ""}),
+                "quality": (["auto", "low", "medium", "high"], {"default": "auto"}),
                 "reference_image_paths": ("STRING", {"multiline": True, "default": ""}),
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
             },
@@ -33,7 +34,7 @@ class OpenAICompatibleImageGenerate:
     FUNCTION = "generate"
     CATEGORY = "api/image"
 
-    def generate(self, prompt, model, size, api_key="", base_url="", api_key_env_path="", reference_image_paths="", negative_prompt=""):
+    def generate(self, prompt, model, size, api_key="", base_url="", api_key_env_path="", quality="auto", reference_image_paths="", negative_prompt=""):
         resolved = _resolve_openai_compatible_config(api_key, base_url, api_key_env_path)
         api_key = resolved["api_key"]
         base_url = resolved["base_url"]
@@ -58,6 +59,7 @@ class OpenAICompatibleImageGenerate:
                 "model": model.strip(),
                 "prompt": final_prompt,
                 "size": size,
+                "quality": quality,
                 "n": "1",
                 "response_format": "b64_json",
             }
@@ -73,12 +75,29 @@ class OpenAICompatibleImageGenerate:
             finally:
                 for handle in handles:
                     handle.close()
+            if _should_fallback_from_edits(response):
+                endpoint = base_url.rstrip("/") + "/v1/images/generations"
+                payload = {
+                    "model": model.strip(),
+                    "prompt": final_prompt,
+                    "size": size,
+                    "quality": quality,
+                    "n": 1,
+                    "response_format": "b64_json",
+                }
+                response = _post_json(session, endpoint, headers, payload)
+                attempts.append(("json_generation_fallback", response))
+                if _should_retry_without_response_format(response):
+                    payload.pop("response_format", None)
+                    response = _post_json(session, endpoint, headers, payload)
+                    attempts.append(("json_generation_fallback_default", response))
         else:
             endpoint = base_url.rstrip("/") + "/v1/images/generations"
             payload = {
                 "model": model.strip(),
                 "prompt": final_prompt,
                 "size": size,
+                "quality": quality,
                 "n": 1,
                 "response_format": "b64_json",
             }
@@ -94,6 +113,7 @@ class OpenAICompatibleImageGenerate:
                     "model": model.strip(),
                     "prompt": final_prompt,
                     "size": size,
+                    "quality": quality,
                     "n": "1",
                 }
                 response = session.post(endpoint, data=form_payload, headers=dict(headers), timeout=600)
@@ -139,7 +159,7 @@ def _resolve_openai_compatible_config(api_key: str, base_url: str, api_key_env_p
     file_base_url = ""
     env_path = str(api_key_env_path or "").strip().strip('"')
     if env_path:
-        path = Path(env_path)
+        path = _resolve_comfy_path(env_path)
         if path.is_file():
             text = path.read_text(encoding="utf-8", errors="ignore")
             file_api_key = _first_match(
@@ -192,7 +212,7 @@ def _reference_paths(reference_image_paths: str) -> list[Path]:
         raw = line.strip().strip('"')
         if not raw:
             continue
-        path = Path(raw)
+        path = _resolve_comfy_path(raw)
         normalized = str(path).lower()
         if normalized in seen:
             continue
@@ -203,6 +223,21 @@ def _reference_paths(reference_image_paths: str) -> list[Path]:
     if len(paths) > 16:
         raise ValueError("reference_image_paths supports at most 16 images")
     return paths
+
+
+def _resolve_comfy_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_file():
+        return path
+
+    comfy_root = Path(__file__).resolve().parents[1]
+    normalized = value.replace("\\", "/")
+    if normalized == "/comfyui" or normalized.startswith("/comfyui/"):
+        relative = normalized.removeprefix("/comfyui").lstrip("/")
+        return comfy_root / Path(relative)
+    if not path.is_absolute():
+        return comfy_root / path
+    return path
 
 
 def _extract_image_bytes(data, session: requests.Session) -> bytes:
@@ -245,6 +280,10 @@ def _should_retry_without_response_format(response: requests.Response) -> bool:
         or "b64_json" in text
         or "invalid_request_error" in text
     )
+
+
+def _should_fallback_from_edits(response: requests.Response) -> bool:
+    return response.status_code >= 400
 
 
 def _should_retry_as_form(response: requests.Response) -> bool:

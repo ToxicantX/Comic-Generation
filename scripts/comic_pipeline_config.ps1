@@ -59,6 +59,7 @@ function Get-ComicPipelineConfig {
     $comfyOutputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_OUTPUT_ROOT" -Default (Join-Path $comfyRoot "output")
     $outputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_OUTPUT_ROOT" -Default (Join-Path $comfyOutputRoot "ComicPipeline")
     $imageEnvPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_ENV_PATH" -Default (Join-Path $Root "config\image.env")
+    $imageQuality = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_QUALITY" -Default "auto"
     $novelPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_NOVEL_PATH" -Default (Join-Path $Root "novel.txt")
     $pythonPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_PYTHON_PATH"
     if (-not $pythonPath) {
@@ -79,6 +80,7 @@ function Get-ComicPipelineConfig {
         DatabaseUrl = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_DATABASE_URL" -Default "postgresql://comic_pipeline:comic_pipeline@127.0.0.1:54329/comic_pipeline"
         TextModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_TEXT_MODEL" -Default "gpt-4.1-mini"
         ImageModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_MODEL" -Default "gpt-image-2"
+        ImageQuality = $imageQuality
         PythonPath = $pythonPath
         DefaultPages = [int](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_DEFAULT_PAGES" -Default "8")
         Encoding = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_ENCODING" -Default "gb18030"
@@ -98,6 +100,7 @@ function Set-ComicPipelineProcessEnv {
     $env:COMIC_PIPELINE_DATABASE_URL = [string]$Config.DatabaseUrl
     $env:COMIC_PIPELINE_TEXT_MODEL = [string]$Config.TextModel
     $env:COMIC_PIPELINE_IMAGE_MODEL = [string]$Config.ImageModel
+    $env:COMIC_PIPELINE_IMAGE_QUALITY = [string]$Config.ImageQuality
     $env:COMIC_PIPELINE_PYTHON_PATH = [string]$Config.PythonPath
     $env:COMIC_PIPELINE_DEFAULT_PAGES = [string]$Config.DefaultPages
     $env:COMIC_PIPELINE_ENCODING = [string]$Config.Encoding

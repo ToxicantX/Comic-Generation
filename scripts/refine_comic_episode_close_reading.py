@@ -281,7 +281,7 @@ def close_read_pages_with_model(episode: dict, pages: list[dict], context: dict)
                                         "caption": "可空，最多一句",
                                         "dialogue": [{"speaker": "人物名，可空", "text": "对白，可空", "position": "bottom"}],
                                         "prompt": "具体画面提示词：角色、场景、动作、情绪、镜头、构图、风格约束",
-                                        "reference_alias": ""
+                                        "reference_alias": "只能填写 locked_assets 中一个素材的 title；没有合适素材则留空"
                                     }
                                 ],
                             }

@@ -1,11 +1,16 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$PromptId,
-    [string]$ComfyUrl = "http://127.0.0.1:8188",
+    [string]$ComfyUrl = "",
     [int]$PollSeconds = 10,
     [int]$MaxPolls = 120,
     [string]$ResultPath = ""
 )
+
+. "$PSScriptRoot\comic_pipeline_config.ps1"
+if (-not $ComfyUrl) {
+    $ComfyUrl = (Get-ComicPipelineConfig).ComfyUrl
+}
 
 $result = $null
 for ($i = 0; $i -lt $MaxPolls; $i++) {

@@ -1,9 +1,13 @@
 import importlib.util
+import hashlib
+import io
+import json
 import os
 import sys
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -286,6 +290,31 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(payload["episode_number"], 3)
         self.assertEqual(payload["retried_from"], "failed-job")
 
+    def test_retry_completed_asset_job_only_reconciles_output(self):
+        server = load_server_module()
+        job = {
+            "id": "asset-job",
+            "stage": "asset_regenerate",
+            "status": "failed",
+            "exit_code": 0,
+            "project_slug": "ssj",
+            "retry_payload": {"asset_id": 12},
+        }
+        project = {"slug": "ssj"}
+        with patch.object(server, "recent_jobs", return_value=[job]):
+            with patch.object(server, "active_project", return_value=project):
+                with patch.object(server, "project_by_slug", return_value=project):
+                    with patch.object(server, "complete_asset_regeneration", return_value={"asset": {"id": 12}}) as reconcile:
+                        with patch.object(server.db, "save_job") as save_job:
+                            with patch.object(server, "start_regenerate_job") as regenerate:
+                                result = server.retry_job_api("asset-job")
+
+        self.assertEqual(result["status"], "passed")
+        self.assertTrue(result["result"]["reconciled"])
+        reconcile.assert_called_once()
+        save_job.assert_called_once()
+        regenerate.assert_not_called()
+
     def test_retry_job_rejects_cross_project_execution(self):
         server = load_server_module()
         source = {
@@ -379,15 +408,16 @@ class RuntimeConfigTest(unittest.TestCase):
                 "approved_assets": 1,
                 "message": "",
             }):
-                with patch.object(server, "generated_output_quality_status", return_value={}):
-                    with patch.object(server, "generated_output_review_blockers", return_value={"count": 0}):
-                        recommendation = server.agent_recommendation(
-                            1,
-                            {"ok": True, "image_api_key_configured": True},
-                            detail,
-                            {},
-                            server.default_approval_state(),
-                        )
+                with patch.object(server, "chapter_asset_coverage", return_value={"ok": True, "message": ""}):
+                    with patch.object(server, "generated_output_quality_status", return_value={}):
+                        with patch.object(server, "generated_output_review_blockers", return_value={"count": 0}):
+                            recommendation = server.agent_recommendation(
+                                1,
+                                {"ok": True, "image_api_key_configured": True},
+                                detail,
+                                {},
+                                server.default_approval_state(),
+                            )
 
         self.assertEqual(recommendation["stage"], "close_reading")
         self.assertFalse(recommendation["requires_approval"])
@@ -588,6 +618,83 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("setting_1", paths[0])
         self.assertIn("setting_2", paths[1])
 
+    def test_chapter_setting_references_are_inferred_from_text_and_chapter(self):
+        server = load_server_module()
+        settings = [
+            {"id": 1, "name": "拓拔野", "aliases": ["小野"], "chapter_numbers": [], "item_type": "character"},
+            {"id": 2, "name": "玉屏山", "aliases": [], "chapter_numbers": [3], "item_type": "location"},
+            {"id": 3, "name": "无关人物", "aliases": [], "chapter_numbers": [8], "item_type": "character"},
+        ]
+        pages = [{
+            "summary": "拓拔野夜闯庭院。",
+            "source_excerpt": "小野抬头望向山巅。",
+            "panels": [{"prompt": "少年在月色下拔剑"}],
+        }]
+
+        result = server.infer_referenced_setting_ids(3, pages, settings)
+
+        self.assertEqual(result, [1, 2])
+
+    def test_chapter_asset_coverage_blocks_missing_core_asset(self):
+        server = load_server_module()
+        project = {"slug": "ssj"}
+        settings = [{
+            "id": 1,
+            "name": "拓拔野",
+            "item_type": "character",
+            "importance": "core",
+            "review_status": "approved",
+            "locked": True,
+            "chapter_numbers": [3],
+        }]
+        coverage = server.chapter_asset_coverage(
+            project,
+            3,
+            pages=[{"summary": "拓拔野进入庭院。", "panels": []}],
+            settings=settings,
+            assets=[],
+            breakdown={"referenced_setting_ids": [1]},
+        )
+
+        self.assertFalse(coverage["ok"])
+        self.assertEqual(coverage["required_count"], 1)
+        self.assertEqual(coverage["missing_assets"], ["拓拔野"])
+        self.assertIn("核心素材", coverage["message"])
+
+    def test_chapter_asset_coverage_accepts_approved_linked_file(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_path = Path(temp_dir) / "tuobaye.png"
+            asset_path.write_bytes(b"image")
+            settings = [{
+                "id": 1,
+                "name": "拓拔野",
+                "item_type": "character",
+                "importance": "core",
+                "review_status": "approved",
+                "locked": True,
+                "chapter_numbers": [3],
+            }]
+            assets = [{
+                "id": 9,
+                "setting_item_id": 1,
+                "file_path": str(asset_path),
+                "review_status": "approved",
+                "locked": True,
+            }]
+
+            coverage = server.chapter_asset_coverage(
+                {"slug": "ssj"},
+                3,
+                pages=[{"summary": "拓拔野进入庭院。", "panels": []}],
+                settings=settings,
+                assets=assets,
+                breakdown={"referenced_setting_ids": [1]},
+            )
+
+        self.assertTrue(coverage["ok"])
+        self.assertEqual(coverage["covered_count"], 1)
+
     def test_asset_workflow_uses_approved_setting_prompts(self):
         server = load_server_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -613,6 +720,156 @@ class RuntimeConfigTest(unittest.TestCase):
             self.assertIn("腰悬铜刀", inputs["prompt"])
             self.assertIn("现代服饰", inputs["negative_prompt"])
             self.assertEqual(inputs["model"], "test-image-model")
+            self.assertEqual(inputs["quality"], "auto")
+            self.assertEqual(inputs["api_key_env_path"], ".comic-pipeline/image.env")
+
+    def test_asset_workflow_paths_are_unique_for_chinese_aliases(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch.object(server, "GENERATED_ASSET_WORKFLOW_DIR", root / "workflows"):
+                with patch.object(server, "config_snapshot", return_value={"config": {}}):
+                    with patch.object(server, "comfy_output_root", return_value=root / "output"):
+                        first = server.create_asset_workflow(
+                            "白石灯塔", "world_scenes", root / "output" / "setting_95_reference.png"
+                        )
+                        second = server.create_asset_workflow(
+                            "黄铜罗盘", "weapons", root / "output" / "setting_107_reference.png"
+                        )
+
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+
+    def test_complete_asset_regeneration_uses_comfy_numbered_output(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            generated = root / "assets" / "hero_reference_00001_.png"
+            generated.parent.mkdir()
+            generated.write_bytes(b"generated-image")
+            current = {"id": 12, "project_slug": "ssj", "raw": {}}
+
+            with patch.object(server, "comfy_output_root", return_value=root):
+                with patch.object(server.db, "get_visual_asset", return_value=current):
+                    with patch.object(server.db, "update_visual_asset", side_effect=lambda _url, _id, updates: {**current, **updates}) as update:
+                        with patch.object(server.db, "add_review"):
+                            server.complete_asset_regeneration({"slug": "ssj"}, {
+                                "id": "asset-job-numbered",
+                                "asset_id": 12,
+                                "asset_path": str(root / "assets" / "hero_reference.png"),
+                                "workflow_path": str(root / "missing-workflow.json"),
+                            })
+
+            self.assertEqual(update.call_args.args[2]["file_path"], str(generated))
+
+    def test_asset_batch_rejects_more_than_twenty_assets(self):
+        server = load_server_module()
+
+        with self.assertRaisesRegex(ValueError, "最多选择 20 个"):
+            server.start_asset_batch_job({"asset_ids": list(range(1, 22))})
+
+    def test_asset_batch_aggregates_failed_children_for_retry(self):
+        server = load_server_module()
+        project = {"slug": "ssj", "title": "搜神记"}
+        parent = {
+            "id": "asset-batch-parent",
+            "stage": "asset_batch",
+            "project_slug": "ssj",
+            "asset_ids": [11, 12],
+            "status": "running",
+            "progress": {"total": 2, "completed": 0, "failed": 0},
+            "retry_payload": {"asset_ids": [11, 12], "episode_number": 3},
+        }
+        server.JOBS[parent["id"]] = parent
+
+        def fake_start(payload):
+            asset_id = int(payload["asset_id"])
+            child_id = f"child-{asset_id}"
+            server.JOBS[child_id] = {
+                "id": child_id,
+                "asset_id": asset_id,
+                "status": "passed" if asset_id == 11 else "failed",
+                "diagnostics": {"title": "图片接口失败"} if asset_id == 12 else {},
+            }
+            return server.JOBS[child_id]
+
+        with patch.object(server, "project_by_slug", return_value=project):
+            with patch.object(server, "start_asset_regenerate_job", side_effect=fake_start):
+                with patch.object(server.db, "save_job"):
+                    server.run_asset_batch_job(parent["id"])
+
+        result = server.JOBS[parent["id"]]
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["completed_asset_ids"], [11])
+        self.assertEqual(result["failed_asset_ids"], [12])
+        self.assertEqual(result["retry_payload"]["asset_ids"], [12])
+        self.assertEqual(result["progress"]["completed"], 1)
+        self.assertEqual(result["progress"]["failed"], 1)
+
+    def test_asset_batch_child_uses_parent_project_slug(self):
+        server = load_server_module()
+        project = {"slug": "novel_a", "title": "小说 A"}
+        parent = {
+            "id": "asset-batch-project",
+            "stage": "asset_batch",
+            "project_slug": "novel_a",
+            "asset_ids": [7],
+            "episode_number": 2,
+            "status": "running",
+            "progress": {"total": 1, "completed": 0, "failed": 0},
+            "retry_payload": {"asset_ids": [7], "episode_number": 2},
+        }
+        server.JOBS[parent["id"]] = parent
+        payloads = []
+
+        def fake_start(payload):
+            payloads.append(payload)
+            server.JOBS["child-7"] = {"id": "child-7", "asset_id": 7, "status": "passed"}
+            return server.JOBS["child-7"]
+
+        with patch.object(server, "project_by_slug", return_value=project):
+            with patch.object(server, "start_asset_regenerate_job", side_effect=fake_start):
+                with patch.object(server.db, "save_job"):
+                    server.run_asset_batch_job(parent["id"])
+
+        self.assertEqual(payloads[0]["project_slug"], "novel_a")
+        self.assertEqual(payloads[0]["episode_number"], 2)
+
+    def test_backup_archive_rejects_unsafe_member_paths(self):
+        server = load_server_module()
+
+        for name in ("../config/.env", "/absolute/file", "C:/secret.txt", "files\\..\\secret.txt"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "不安全路径"):
+                    server.validate_backup_member_name(name)
+
+    def test_backup_archive_rejects_checksum_mismatch(self):
+        server = load_server_module()
+        data_bytes = json.dumps({"project": {"slug": "source"}}, ensure_ascii=False).encode("utf-8")
+        manifest = {
+            "schema_version": 1,
+            "source_project": {"slug": "source", "title": "源项目"},
+            "checksums": {"data.json": hashlib.sha256(b"different").hexdigest()},
+            "files": [],
+        }
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+            archive.writestr("data.json", data_bytes)
+
+        with self.assertRaisesRegex(ValueError, "校验和不一致"):
+            server.read_project_backup_archive(stream.getvalue())
+
+    def test_backup_import_rejects_existing_target_slug_before_writing(self):
+        server = load_server_module()
+
+        with patch.object(server.db, "get_project", return_value={"slug": "existing"}):
+            with self.assertRaisesRegex(ValueError, "已存在"):
+                server.import_project_backup_api({
+                    "target_slug": "existing",
+                    "content_base64": "not-read-when-target-exists",
+                })
 
     def test_generation_context_includes_review_feedback_for_regeneration(self):
         server = load_server_module()
@@ -625,6 +882,34 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("本次重生成审核反馈", block)
         self.assertIn("角色面部与前页不一致", block)
         self.assertIn("保持青衣和铜刀", block)
+
+    def test_generation_hydrates_asset_aliases_and_normalizes_ai_reference_text(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan_path = root / "episode.json"
+            character = root / "character.png"
+            location = root / "location.png"
+            character.write_bytes(b"character")
+            location.write_bytes(b"location")
+            plan_path.write_text(__import__("json").dumps({
+                "pages": [{"panels": [{
+                    "prompt": "暴雨中林舟站在白石灯塔内。",
+                    "reference_alias": "角色参考：林舟；场景参考：白石灯塔",
+                }]}]
+            }), encoding="utf-8")
+            context = {"assets": [
+                {"id": 2, "type": "world_scenes", "title": "白石灯塔", "file_path": str(location)},
+                {"id": 1, "type": "characters", "title": "林舟", "file_path": str(character)},
+            ]}
+
+            with patch.object(server, "project_episode_plan_path", return_value=plan_path):
+                result = server.hydrate_episode_asset_aliases({"slug": "test"}, 1, context)
+
+            saved = __import__("json").loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["asset_aliases"]["林舟"], str(character))
+            self.assertEqual(saved["pages"][0]["panels"][0]["reference_alias"], "林舟")
+            self.assertEqual(result["plan_path"], str(plan_path))
 
     def test_complete_asset_regeneration_returns_asset_to_review_with_version(self):
         server = load_server_module()
@@ -817,6 +1102,46 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("蚩尤", names)
         self.assertTrue(all(item.get("visual_prompt") for item in characters))
         self.assertTrue(all(item.get("source_evidence") for item in characters))
+
+    def test_ai_setting_discovery_finds_unknown_character_and_prop_from_chapter_text(self):
+        server = load_server_module()
+        chapters = [{
+            "chapter_number": 1,
+            "volume": "白石灯塔",
+            "title": "第一章 雨夜来客",
+            "raw": {
+                "excerpt": "二十八岁的守塔人林舟穿着深蓝防水长衣，左眉有浅疤。他拿起黄铜罗盘，罗盘盖上刻着白色浪纹。",
+            },
+        }]
+
+        with patch.object(server, "runtime_config", return_value={
+            "COMIC_PIPELINE_TEXT_MODEL": "configured-model",
+            "COMIC_PIPELINE_TEXT_ENV_PATH": "/tmp/text.env",
+            "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "300",
+            "COMIC_PIPELINE_TEXT_MODEL_STREAM": "true",
+        }):
+            with patch.object(server, "chat_json", return_value={
+                "items": [
+                    {"item_type": "character", "name": "林舟", "description": "成年守塔人", "visual_prompt": "二十八岁男性，深蓝防水长衣，左眉浅疤", "importance": "core"},
+                    {"item_type": "prop", "name": "黄铜罗盘", "description": "刻有白色浪纹", "visual_prompt": "黄铜罗盘，白色浪纹", "importance": "high"},
+                    {"item_type": "character", "name": "不存在的人", "description": "模型幻觉"},
+                ],
+                "_model": "test-model",
+            }):
+                candidates, report = server.ai_discover_setting_candidates(
+                    {"slug": "lighthouse", "title": "白石灯塔"},
+                    chapters,
+                    limit=10,
+                )
+
+        names = {item["name"] for item in candidates}
+        self.assertEqual(names, {"林舟", "黄铜罗盘"})
+        self.assertEqual(report["used_count"], 1)
+        character = next(item for item in candidates if item["name"] == "林舟")
+        self.assertEqual(character["item_type"], "character")
+        self.assertEqual(character["chapter_numbers"], [1])
+        self.assertTrue(character["source_evidence"])
+        self.assertEqual(character["raw"]["source"], "ai_candidate_discovery")
 
     def test_scan_settings_ai_mode_enhances_candidates_with_text_model(self):
         server = load_server_module()

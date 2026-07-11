@@ -33,6 +33,28 @@ class FakeStreamResponse:
 
 
 class TextModelClientTest(unittest.TestCase):
+    def test_chat_json_sends_application_user_agent(self):
+        client = load_client_module()
+        chunks = [b'data: {"choices":[{"delta":{"content":"{\\"ok\\":true}"}}]}\n\n', b"data: [DONE]\n\n"]
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["user_agent"] = request.get_header("User-agent")
+            return FakeStreamResponse(chunks)
+
+        with patch.object(client, "text_model_config", return_value={
+            "model": "test-model",
+            "base_url": "https://example.test/v1",
+            "api_key": "key",
+            "env_path": "",
+            "timeout": 180,
+            "stream": True,
+        }):
+            with patch.object(client.urllib.request, "urlopen", side_effect=fake_urlopen):
+                client.chat_json([{"role": "user", "content": "test"}], stream=True)
+
+        self.assertEqual(captured["user_agent"], "ComicPipeline/1.0")
+
     def test_chat_json_streaming_combines_delta_content(self):
         client = load_client_module()
         events = [

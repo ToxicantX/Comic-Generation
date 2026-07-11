@@ -19,6 +19,7 @@ const state = {
   mediaFocusPageId: "",
   assetCategory: "all",
   assetUsageFilter: "all",
+  selectedAssetIds: new Set(),
   reviewCenterFilter: "all",
   reviewTimelineFilter: "all",
   reviewTimelineRange: "all",
@@ -805,6 +806,7 @@ async function loadConfig() {
     $("textModelStream").checked = String(c.COMIC_PIPELINE_TEXT_MODEL_STREAM || "true").toLowerCase() !== "false";
   }
   setValue("imageModel", c.COMIC_PIPELINE_IMAGE_MODEL);
+  setValue("imageQuality", c.COMIC_PIPELINE_IMAGE_QUALITY || "auto");
   setValue("defaultPages", c.COMIC_PIPELINE_DEFAULT_PAGES);
   setValue("encoding", c.COMIC_PIPELINE_ENCODING);
   setValue("textBaseUrl", state.config.text?.OPENAI_BASE_URL || "");
@@ -859,6 +861,7 @@ function settingsPayloadFromForm() {
       COMIC_PIPELINE_TEXT_MODEL_TIMEOUT: String(Math.max(getInt("textModelTimeout", 300), 30)),
       COMIC_PIPELINE_TEXT_MODEL_STREAM: $("textModelStream")?.checked ? "true" : "false",
       COMIC_PIPELINE_IMAGE_MODEL: $("imageModel").value,
+      COMIC_PIPELINE_IMAGE_QUALITY: $("imageQuality").value,
       COMIC_PIPELINE_DEFAULT_PAGES: $("defaultPages").value,
       COMIC_PIPELINE_ENCODING: $("encoding").value,
       COMIC_PIPELINE_ACTIVE_PROJECT: state.activeProject || "sou_shen_ji",
@@ -1108,7 +1111,8 @@ async function refreshRuntimeStatus(options = {}) {
 
 function jobPollDelay() {
   if (document.hidden) return 60000;
-  return hasActiveEpisodeJob() ? 7000 : 30000;
+  const hasActiveJob = (state.jobs || []).some((job) => ["running", "queued", "starting"].includes(String(job.status || "")));
+  return hasActiveJob ? 3000 : 30000;
 }
 
 function scheduleJobPoll(delay = jobPollDelay()) {
@@ -1155,6 +1159,9 @@ async function loadJobs() {
       await loadEpisode(state.selectedEpisode, { skipAgent: true });
       await loadAgent();
     }
+  }
+  if (latest && state.lastJobState !== previousLatestState && ["asset_batch", "asset_regenerate"].includes(latest.stage) && ["passed", "failed", "partial", "cancelled"].includes(latest.status)) {
+    if (state.activeModule === "assets") await loadAssets(state.selectedEpisode);
   }
 }
 
@@ -1842,7 +1849,7 @@ function renderHomeNovels() {
     const managerOpen = state.projectManagerSlug === novel.slug;
     const statusLabel = archived ? "已归档" : active ? "当前" : "可选";
     return `
-      <article class="novel-card ${active ? "active" : ""} ${archived ? "archived" : ""}">
+      <article class="novel-card ${active ? "active" : ""} ${archived ? "archived" : ""} ${managerOpen ? "manager-open" : ""}">
         <div>
           <span>${active ? "当前小说" : archived ? "归档小说" : "小说项目"}</span>
           <h3>${escapeHtml(novel.title || novel.slug)}</h3>
@@ -1899,6 +1906,21 @@ function renderHomeNovels() {
       await saveProjectSettings(button.dataset.saveProject || "");
     });
   });
+  box.querySelectorAll("[data-export-project]").forEach((button) => {
+    button.addEventListener("click", () => exportProjectBackup(button.dataset.exportProject || ""));
+  });
+  box.querySelectorAll("[data-import-project-trigger]").forEach((button) => {
+    button.addEventListener("click", () => {
+      box.querySelector(`[data-import-project-file="${CSS.escape(button.dataset.importProjectTrigger || "")}"]`)?.click();
+    });
+  });
+  box.querySelectorAll("[data-import-project-file]").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      if (file) await importProjectBackup(file);
+      input.value = "";
+    });
+  });
 }
 
 function renderProjectManager(novel) {
@@ -1921,6 +1943,16 @@ function renderProjectManager(novel) {
       <div class="project-manager-actions">
         <button data-save-project="${escapeHtml(novel.slug)}" class="primary" type="button">保存项目配置</button>
         <span>${novel.status === "archived" ? "当前状态：已归档" : "当前状态：活跃"}</span>
+      </div>
+      <div class="project-backup-tools">
+        <div>
+          <strong>迁移与备份</strong>
+          <small>导出包含 PostgreSQL 项目数据、小说和流程清单；API Key 不会写入备份。</small>
+        </div>
+        <label class="project-backup-option"><input data-backup-media="${escapeHtml(novel.slug)}" type="checkbox">包含素材与漫画图片</label>
+        <button data-export-project="${escapeHtml(novel.slug)}" type="button" title="导出项目备份"><span aria-hidden="true">↓</span>导出备份</button>
+        <button data-import-project-trigger="${escapeHtml(novel.slug)}" type="button" title="将备份导入为新项目"><span aria-hidden="true">↑</span>导入为新项目</button>
+        <input data-import-project-file="${escapeHtml(novel.slug)}" class="hidden" type="file" accept=".zip,application/zip">
       </div>
     </section>
   `;
@@ -1955,6 +1987,60 @@ async function saveProjectSettings(slug) {
   }
 }
 
+async function exportProjectBackup(slug) {
+  if (!slug) return;
+  const includeMedia = Boolean(document.querySelector(`[data-backup-media="${CSS.escape(slug)}"]`)?.checked);
+  if (includeMedia && !window.confirm("包含素材与漫画图片会显著增大备份文件，确认继续导出？")) return;
+  setButtons(true);
+  try {
+    const result = await api(`/api/projects/${encodeURIComponent(slug)}/backup`, {
+      method: "POST",
+      body: JSON.stringify({ include_media: includeMedia }),
+    });
+    const link = document.createElement("a");
+    link.href = result.download_url;
+    link.download = result.filename || `${slug}_backup.zip`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.alert(`项目备份已生成：${result.filename}。共 ${Number(result.manifest?.file_count || 0)} 个文件。`);
+  } catch (error) {
+    window.alert(error.message || "导出项目备份失败");
+  } finally {
+    setButtons(false);
+  }
+}
+
+async function importProjectBackup(file) {
+  if (!file) return;
+  if (file.size > 512 * 1024 * 1024) {
+    window.alert("备份文件超过 512MB 上传上限。");
+    return;
+  }
+  const sourceStem = file.name.replace(/_backup_\d{8}_\d{6}\.zip$/i, "").replace(/\.zip$/i, "") || "comic_project";
+  const targetSlug = await promptDialog(
+    "输入新项目标识。导入只会创建新项目，不会覆盖已有项目。",
+    `${sourceStem}_import_${Date.now()}`,
+    { title: "导入项目备份", kind: "项目迁移", confirmText: "开始导入" },
+  );
+  if (!targetSlug) return;
+  setButtons(true);
+  try {
+    const contentBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+    const result = await api("/api/projects/import-backup", {
+      method: "POST",
+      body: JSON.stringify({ target_slug: targetSlug.trim(), content_base64: contentBase64 }),
+    });
+    state.projectManagerSlug = result.project?.slug || "";
+    await Promise.all([loadProjects(), loadDashboard()]);
+    window.alert(result.message || "项目备份导入完成");
+  } catch (error) {
+    window.alert(error.message || "导入项目备份失败");
+  } finally {
+    setButtons(false);
+  }
+}
+
 async function archiveProject(slug, archived) {
   if (!slug) return;
   const verb = archived ? "归档" : "恢复";
@@ -1980,7 +2066,9 @@ function renderProjects() {
   for (const project of state.projects) {
     const option = document.createElement("option");
     option.value = project.slug;
-    option.textContent = `${project.title || project.slug} · ${Number(project.episodes || 0)} 章`;
+    const archived = project.status === "archived";
+    option.textContent = `${project.title || project.slug} · ${Number(project.episodes || 0)} 章${archived ? " · 已归档" : ""}`;
+    option.disabled = archived;
     option.selected = project.slug === state.activeProject;
     select.append(option);
   }
@@ -2006,6 +2094,7 @@ async function switchProject(slug) {
     });
     state.activeProject = slug;
     state.selectedEpisode = 1;
+    state.selectedAssetIds.clear();
     await Promise.all([loadConfig(), loadProjects(), loadEpisodes()]);
     const first = state.episodes[0]?.episode_number || 1;
     await loadEpisode(first);
@@ -2994,6 +3083,8 @@ function renderAssets() {
   const allItems = Object.values(assets?.categories || {}).flat();
   const currentUsedCount = allItems.filter((item) => item.is_used_in_current).length;
   const visibleCategories = filteredAssetCategories(assets);
+  const selectableIds = new Set(allItems.filter((item) => item.can_regenerate && item.db_asset_id).map((item) => String(item.db_asset_id)));
+  state.selectedAssetIds = new Set([...state.selectedAssetIds].filter((id) => selectableIds.has(String(id))));
   const db = assets?.database || {};
   const active = state.projects.find((item) => item.slug === state.activeProject);
   $("assetScopeMetric").textContent = `${active?.title || state.activeProject || "当前作品"} · ${Number(assets?.total_assets || 0)} 个素材`;
@@ -3005,6 +3096,7 @@ function renderAssets() {
     assetDbBadge.className = "mini-badge " + (pending ? "warn" : "ok");
   }
   renderAssetCategoryFilters(assets);
+  updateAssetBatchControls(visibleCategories);
   let renderedCount = 0;
   for (const [category, items] of Object.entries(visibleCategories)) {
     if (!items.length) continue;
@@ -3043,6 +3135,75 @@ function renderAssets() {
   box.querySelectorAll("[data-asset-setting]").forEach((select) => {
     select.addEventListener("change", () => bindAssetSetting(select.dataset.assetSetting, select.value));
   });
+  box.querySelectorAll("[data-asset-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = String(checkbox.dataset.assetSelect || "");
+      if (checkbox.checked) state.selectedAssetIds.add(id);
+      else state.selectedAssetIds.delete(id);
+      checkbox.closest(".asset-card")?.classList.toggle("selected", checkbox.checked);
+      updateAssetBatchControls(filteredAssetCategories(state.detail?.assets));
+    });
+  });
+}
+
+function visibleSelectableAssetIds(categories = filteredAssetCategories(state.detail?.assets)) {
+  return Object.values(categories || {}).flat()
+    .filter((item) => item.can_regenerate && item.db_asset_id)
+    .map((item) => String(item.db_asset_id));
+}
+
+function updateAssetBatchControls(categories = filteredAssetCategories(state.detail?.assets)) {
+  const selectedCount = state.selectedAssetIds.size;
+  const visibleIds = visibleSelectableAssetIds(categories);
+  if ($("assetSelectionCount")) $("assetSelectionCount").textContent = `已选择 ${selectedCount} 个`;
+  if ($("assetQuotaHint")) $("assetQuotaHint").textContent = `预计调用图片模型 ${selectedCount} 次，费用按供应商计费`;
+  if ($("assetSelectVisibleButton")) $("assetSelectVisibleButton").disabled = !visibleIds.length;
+  if ($("assetClearSelectionButton")) $("assetClearSelectionButton").disabled = !selectedCount;
+  if ($("assetGenerateSelectedButton")) $("assetGenerateSelectedButton").disabled = !selectedCount;
+}
+
+function selectVisibleAssets() {
+  visibleSelectableAssetIds().forEach((id) => state.selectedAssetIds.add(id));
+  renderAssets();
+}
+
+function clearAssetSelection() {
+  state.selectedAssetIds.clear();
+  renderAssets();
+}
+
+async function generateSelectedAssets() {
+  const assetIds = [...state.selectedAssetIds].map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0);
+  if (!assetIds.length) {
+    window.alert("请先选择需要生成的素材。");
+    return;
+  }
+  if (assetIds.length > 20) {
+    window.alert("单次最多选择 20 个素材，请分批生成。");
+    return;
+  }
+  const ok = window.confirm(`批量生成 ${assetIds.length} 个素材？预计调用图片模型 ${assetIds.length} 次，实际费用按供应商计费。任务会串行执行，可在任务中心查看进度和重试失败项。`);
+  if (!ok) return;
+  setButtons(true);
+  try {
+    const job = await api("/api/assets/generate-batch", {
+      method: "POST",
+      body: JSON.stringify({
+        project_slug: state.activeProject,
+        episode_number: state.selectedEpisode,
+        asset_ids: assetIds,
+      }),
+    });
+    state.selectedAssetIds.clear();
+    state.selectedTaskJobId = job.id || "";
+    await loadJobs();
+    await switchModule("taskCenter");
+    window.alert(`已启动 ${assetIds.length} 个素材的批量生成任务。`);
+  } catch (error) {
+    window.alert(error.message || "批量生成素材启动失败");
+  } finally {
+    setButtons(false);
+  }
 }
 
 async function syncAssetsToDatabase() {
@@ -3990,8 +4151,15 @@ function assetCard(item) {
   const lockAction = item.db_asset_id
     ? `<button data-asset-lock="${escapeHtml(item.db_asset_id)}" data-asset-locked="${item.db_locked ? "true" : "false"}" type="button" title="${item.db_locked ? "解除锁定" : "锁定素材"}"><i aria-hidden="true">${item.db_locked ? "□" : "■"}</i><span>${item.db_locked ? "解锁" : "锁定"}</span></button>`
     : "";
+  const assetId = String(item.db_asset_id || "");
+  const selectable = Boolean(item.can_regenerate && assetId);
+  const selected = selectable && state.selectedAssetIds.has(assetId);
+  const selectControl = `<label class="asset-select-control" title="${selectable ? "选择素材进行批量生成" : escapeHtml(item.action_note || "同步入库并审核设定后可选择")}">
+      <input type="checkbox" data-asset-select="${escapeHtml(assetId)}" ${selected ? "checked" : ""} ${selectable ? "" : "disabled"} aria-label="选择 ${escapeHtml(title)}">
+    </label>`;
   return `
-    <article class="asset-card" ${item.db_asset_id ? `data-asset-card-id="${escapeHtml(item.db_asset_id)}"` : ""}>
+    <article class="asset-card${selected ? " selected" : ""}" ${item.db_asset_id ? `data-asset-card-id="${escapeHtml(item.db_asset_id)}"` : ""}>
+      ${selectControl}
       ${image}
       <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
       <small title="${escapeHtml(assetUsageDetail(item))}">${escapeHtml(secondary)}</small>
@@ -5243,6 +5411,12 @@ function setButtons(disabled) {
     "[data-output-review]",
     "[data-output-batch]",
     "[data-asset-regenerate]",
+    "[data-asset-select]",
+    "#assetSelectVisibleButton",
+    "#assetClearSelectionButton",
+    "#assetGenerateSelectedButton",
+    "[data-export-project]",
+    "[data-import-project-trigger]",
     "#agentPrimaryButton",
     "#agentRefreshButton",
     "#assetSyncButton",
@@ -5496,6 +5670,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   $("assetRefreshButton").addEventListener("click", () => loadEpisode(state.selectedEpisode));
   $("assetSyncButton").addEventListener("click", syncAssetsToDatabase);
+  $("assetSelectVisibleButton").addEventListener("click", selectVisibleAssets);
+  $("assetClearSelectionButton").addEventListener("click", clearAssetSelection);
+  $("assetGenerateSelectedButton").addEventListener("click", generateSelectedAssets);
   $("outputSyncButton").addEventListener("click", syncOutputsToDatabase);
   document.querySelectorAll("[data-output-batch]").forEach((button) => {
     button.addEventListener("click", () => reviewVisibleOutputs(button.dataset.outputBatch));

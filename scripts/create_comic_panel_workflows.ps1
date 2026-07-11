@@ -113,8 +113,9 @@ foreach ($panel in $plan.panels) {
                     prompt = $prompt
                     model = $ImageModel
                     size = $panelImageSize
+                    quality = $comicConfig.ImageQuality
                     negative_prompt = $negativeImage
-                    api_key_env_path = $comicConfig.ImageEnvPath
+                    api_key_env_path = ".comic-pipeline/image.env"
                 }
             }
             "2" = [ordered]@{

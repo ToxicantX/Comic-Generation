@@ -201,9 +201,9 @@ def check_panel(
     if workflow_panel.get("filename_prefix") and workflow_json["save_filename_prefixes"]:
         if workflow_panel["filename_prefix"] not in workflow_json["save_filename_prefixes"]:
             issues.append("workflow_json_save_prefix_mismatch_manifest")
-    expected_from_workflow_prefix = expected_output_from_prefix(first_or_empty(workflow_json["save_filename_prefixes"]))
-    if expected_from_workflow_prefix and status_panel.get("expected_panel_path"):
-        if not same_path(expected_from_workflow_prefix, status_panel.get("expected_panel_path", "")):
+    workflow_prefix = first_or_empty(workflow_json["save_filename_prefixes"])
+    if workflow_prefix and status_panel.get("expected_panel_path"):
+        if not output_matches_prefix(status_panel.get("expected_panel_path", ""), workflow_prefix):
             issues.append("workflow_json_expected_output_mismatch_status")
     if status_reference and plan_reference and not same_path(status_reference, plan_reference):
         issues.append("status_reference_image_mismatch_plan")
@@ -370,6 +370,8 @@ def has_no_text_instruction(text: str) -> bool:
             "text-free",
             "without text",
             "avoid text",
+            "do not render text",
+            "无画面内文字",
         )
     )
 
@@ -383,6 +385,14 @@ def expected_output_from_prefix(prefix: str) -> str:
     if not prefix:
         return ""
     return str(Path(r"G:\ComfyUI\output") / f"{prefix}_00001_.png")
+
+
+def output_matches_prefix(output_path: str, prefix: str) -> bool:
+    if not output_path or not prefix:
+        return False
+    normalized_output = str(output_path).replace("\\", "/").lower()
+    normalized_prefix = str(prefix).replace("\\", "/").strip("/").lower()
+    return normalized_output.endswith(f"/{normalized_prefix}_00001_.png")
 
 
 def first_or_empty(values: list[str]) -> str:
