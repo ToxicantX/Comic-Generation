@@ -55,8 +55,8 @@ function Get-ComicPipelineConfig {
     $envPath = if ($env:COMIC_PIPELINE_CONFIG_PATH) { $env:COMIC_PIPELINE_CONFIG_PATH } else { Join-Path $Root "config\.env" }
     $values = Read-ComicEnvFile -Path $envPath
     $workspace = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_WORKSPACE" -Default $Root
-    $comfyRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_ROOT" -Default "G:\ComfyUI"
-    $comfyOutputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_OUTPUT_ROOT" -Default (Join-Path $comfyRoot "output")
+    $comfyRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_ROOT" -Default (Join-Path $Root "ComfyUI")
+    $comfyOutputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_OUTPUT_ROOT" -Default (Join-Path $Root "output")
     $outputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_OUTPUT_ROOT" -Default (Join-Path $comfyOutputRoot "ComicPipeline")
     $imageEnvPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_ENV_PATH" -Default (Join-Path $Root "config\image.env")
     $imageQuality = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_QUALITY" -Default "auto"
@@ -77,6 +77,7 @@ function Get-ComicPipelineConfig {
         OutputRoot = $outputRoot
         NovelPath = $novelPath
         ImageEnvPath = $imageEnvPath
+        ImageBackend = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_BACKEND" -Default "direct_api"
         DatabaseUrl = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_DATABASE_URL" -Default "postgresql://comic_pipeline:comic_pipeline@127.0.0.1:54329/comic_pipeline"
         TextModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_TEXT_MODEL" -Default "gpt-4.1-mini"
         ImageModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_MODEL" -Default "gpt-image-2"
@@ -97,6 +98,7 @@ function Set-ComicPipelineProcessEnv {
     $env:COMIC_PIPELINE_OUTPUT_ROOT = [string]$Config.OutputRoot
     $env:COMIC_PIPELINE_NOVEL_PATH = [string]$Config.NovelPath
     $env:COMIC_PIPELINE_IMAGE_ENV_PATH = [string]$Config.ImageEnvPath
+    $env:COMIC_PIPELINE_IMAGE_BACKEND = [string]$Config.ImageBackend
     $env:COMIC_PIPELINE_DATABASE_URL = [string]$Config.DatabaseUrl
     $env:COMIC_PIPELINE_TEXT_MODEL = [string]$Config.TextModel
     $env:COMIC_PIPELINE_IMAGE_MODEL = [string]$Config.ImageModel

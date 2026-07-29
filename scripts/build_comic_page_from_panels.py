@@ -824,7 +824,6 @@ def cleanup_caption_text(text: str) -> str:
     cleaned = re.sub(r"\s+", "", cleaned)
     cleaned = re.sub(r"([：:，,。；;]){2,}", r"\1", cleaned)
     cleaned = re.sub(r"[^。！？!?，,；;]{0,24}(?:冷冷道|朗声道|大声说道|笑道|呼喊|道|说|喊|叫|问|答)\s*[：:]", "", cleaned)
-    cleaned = re.sub(r"(?:冷冷道|朗声道|大声说道|笑道|呼喊|道|说|喊|叫|问|答)\s*(?=。|，|,|\.{3}|…|$)", "", cleaned)
     cleaned = cleaned.strip(" ：:，,。；;")
     return cleaned
 

@@ -50,6 +50,18 @@ function Start-GenerationBackend {
     }
 
     $config = Read-ComicEnv -Path $configPath
+    $imageBackend = if ($env:COMIC_PIPELINE_IMAGE_BACKEND) {
+        $env:COMIC_PIPELINE_IMAGE_BACKEND
+    } else {
+        $config["COMIC_PIPELINE_IMAGE_BACKEND"]
+    }
+    if ([string]::IsNullOrWhiteSpace($imageBackend)) {
+        $imageBackend = "direct_api"
+    }
+    if ($imageBackend -ne "comfyui") {
+        Write-Host "Direct image API selected; ComfyUI autostart is not required."
+        return
+    }
     $comfyRoot = $config["COMIC_PIPELINE_COMFY_ROOT"]
     if ([string]::IsNullOrWhiteSpace($comfyRoot)) {
         $comfyRoot = "G:\ComfyUI"

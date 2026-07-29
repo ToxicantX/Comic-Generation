@@ -23,11 +23,50 @@ def load_image_node():
 
 
 class CustomImageNodePathTest(unittest.TestCase):
+    def test_edit_fallback_does_not_drop_references_on_auth_rate_limit_or_server_errors(self):
+        module = load_image_node()
+
+        def response(status, message):
+            return type("Response", (), {
+                "status_code": status,
+                "text": message,
+                "json": lambda self: {"error": {"message": message}},
+            })()
+
+        self.assertTrue(module._should_fallback_from_edits(response(404, "not found")))
+        self.assertTrue(module._should_fallback_from_edits(response(400, "image edits endpoint is unsupported")))
+        for status in (401, 403, 429, 500, 503):
+            self.assertFalse(module._should_fallback_from_edits(response(status, "request failed")))
+
+    def test_json_request_retries_rate_limit_once(self):
+        module = load_image_node()
+        limited = type("Response", (), {"status_code": 429, "headers": {}})()
+        passed = type("Response", (), {"status_code": 200, "headers": {}})()
+        session = type("Session", (), {
+            "responses": [limited, passed],
+            "post": lambda self, *args, **kwargs: self.responses.pop(0),
+        })()
+        attempts = []
+
+        with patch.object(module.time, "sleep") as sleep:
+            response = module._post_json_with_rate_limit_retry(
+                session,
+                "https://example.test/v1/images/generations",
+                {},
+                {"model": "test"},
+                attempts,
+                "json_generation",
+            )
+
+        self.assertIs(response, passed)
+        sleep.assert_called_once_with(65)
+        self.assertEqual([name for name, _ in attempts], ["json_generation", "json_generation_rate_limit_retry"])
+
     def test_relative_env_and_container_reference_paths_resolve_from_comfy_root(self):
         module = load_image_node()
         self.assertEqual(module.OpenAICompatibleImageGenerate.INPUT_TYPES()["optional"]["quality"][1]["default"], "auto")
         response = type("Response", (), {"status_code": 502})()
-        self.assertTrue(module._should_fallback_from_edits(response))
+        self.assertFalse(module._should_fallback_from_edits(response))
         with tempfile.TemporaryDirectory() as temp_dir:
             comfy_root = Path(temp_dir)
             custom_nodes = comfy_root / "custom_nodes"

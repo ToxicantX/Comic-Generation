@@ -709,7 +709,7 @@
               <span id="settingsHealthBadge" class="mini-badge">未测试</span>
             </div>
             <div id="settingsHealthList" class="settings-health-list">
-              <div class="settings-empty">点击“连接测试”检查 PostgreSQL、ComfyUI、API Key、输出目录和模型配置。</div>
+              <div class="settings-empty">点击“连接测试”检查 PostgreSQL、当前图片后端、API Key、输出目录和模型配置。</div>
             </div>
           </section>
         </section>
@@ -718,17 +718,27 @@
           <section class="panel">
             <div class="section-head">
               <div>
-                <p class="eyebrow">ComfyUI</p>
+                <p class="eyebrow">图片生成</p>
                 <h2>生成后端</h2>
               </div>
               <span id="settingsBackendBadge" class="mini-badge">待检查</span>
             </div>
-            <label>生成后端地址<input id="comfyUrl" autocomplete="off"></label>
-            <label>生成后端根目录<input id="comfyRoot" autocomplete="off"></label>
+            <label>后端类型
+              <select id="imageBackend">
+                <option value="direct_api">直连图片 API（默认）</option>
+                <option value="comfyui">ComfyUI（本地模型）</option>
+              </select>
+            </label>
+            <small id="backendModeNote" class="settings-note">直连图片 API，无需启动独立生成服务。</small>
+            <fieldset id="comfySettingsFields" class="backend-optional-fields">
+              <legend>ComfyUI 可选配置</legend>
+              <label>ComfyUI 地址<input id="comfyUrl" autocomplete="off"></label>
+              <label>ComfyUI 根目录<input id="comfyRoot" autocomplete="off"></label>
+            </fieldset>
             <label>输出目录<input id="outputRoot" autocomplete="off"></label>
             <div class="backend-actions">
               <button id="checkBackendButton" type="button">检查后端</button>
-              <button id="startBackendButton" class="primary" type="button">启动后端</button>
+              <button id="startBackendButton" class="primary" type="button">无需启动</button>
             </div>
             <div id="backendDiagnostics" class="backend-diagnostics">尚未检查生成后端。</div>
           </section>
@@ -765,7 +775,7 @@
               <span id="settingsImageKeyBadge" class="mini-badge">未配置</span>
             </div>
             <label>图片生成模型<input id="imageModel" autocomplete="off"></label>
-            <small class="settings-note">用于 ComfyUI 图片生成节点，不与小说处理模型混用。</small>
+            <small class="settings-note">直连 API 使用此模型；ComfyUI 本地模型由工作流节点选择，仅云端图片节点使用此项。</small>
             <label>图片生成质量
               <select id="imageQuality">
                 <option value="auto">自动</option>

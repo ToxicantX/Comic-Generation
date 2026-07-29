@@ -26,6 +26,7 @@ import db
 _ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT_FOR_IMPORTS / "scripts"))
 from process_novel import build_chapter_index, fallback_chapter_index
+from image_provider import image_api_url, normalize_backend
 from text_model_client import chat_json
 
 
@@ -45,6 +46,7 @@ BACKUPS_DIR = ROOT / "backups"
 LOG_DIR = ROOT / "logs"
 RUN_SCRIPT = SCRIPTS_DIR / "run_comic_episode_pipeline.ps1"
 RUN_IMAGE_WORKFLOW_SCRIPT = SCRIPTS_DIR / "run_image_workflow_and_wait.ps1"
+IMAGE_PROVIDER_SCRIPT = SCRIPTS_DIR / "image_provider.py"
 ASSEMBLE_PAGE_SCRIPT = SCRIPTS_DIR / "build_comic_page_from_panels.ps1"
 PROCESS_NOVEL_SCRIPT = SCRIPTS_DIR / "process_novel.py"
 CLOSE_READING_SCRIPT = SCRIPTS_DIR / "refine_comic_episode_close_reading.py"
@@ -66,6 +68,7 @@ PIPELINE_KEYS = [
     "COMIC_PIPELINE_NOVEL_PATH",
     "COMIC_PIPELINE_TEXT_ENV_PATH",
     "COMIC_PIPELINE_IMAGE_ENV_PATH",
+    "COMIC_PIPELINE_IMAGE_BACKEND",
     "COMIC_PIPELINE_DATABASE_URL",
     "COMIC_PIPELINE_TEXT_MODEL",
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT",
@@ -80,13 +83,14 @@ PIPELINE_KEYS = [
 
 DEFAULTS = {
     "COMIC_PIPELINE_WORKSPACE": str(ROOT),
-    "COMIC_PIPELINE_COMFY_ROOT": r"G:\ComfyUI",
+    "COMIC_PIPELINE_COMFY_ROOT": str(ROOT / "ComfyUI"),
     "COMIC_PIPELINE_COMFY_URL": "http://127.0.0.1:8188",
-    "COMIC_PIPELINE_OUTPUT_ROOT": r"G:\ComfyUI\output\ComicPipeline",
-    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": r"G:\ComfyUI\output",
+    "COMIC_PIPELINE_OUTPUT_ROOT": str(ROOT / "output" / "ComicPipeline"),
+    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(ROOT / "output"),
     "COMIC_PIPELINE_NOVEL_PATH": str(ROOT / "novel.txt"),
     "COMIC_PIPELINE_TEXT_ENV_PATH": str(TEXT_ENV_PATH),
     "COMIC_PIPELINE_IMAGE_ENV_PATH": str(IMAGE_ENV_PATH),
+    "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
     "COMIC_PIPELINE_DATABASE_URL": "postgresql://comic_pipeline:comic_pipeline@127.0.0.1:54329/comic_pipeline",
     "COMIC_PIPELINE_TEXT_MODEL": "gpt-4.1-mini",
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "300",
@@ -480,6 +484,9 @@ def config_snapshot() -> dict:
 def save_config(payload: dict) -> dict:
     current = config_snapshot()["config"]
     incoming = payload.get("config") or {}
+    if "COMIC_PIPELINE_IMAGE_BACKEND" in incoming:
+        incoming = dict(incoming)
+        incoming["COMIC_PIPELINE_IMAGE_BACKEND"] = normalize_backend(incoming["COMIC_PIPELINE_IMAGE_BACKEND"])
     for key in PIPELINE_KEYS:
         if key in incoming:
             current[key] = str(incoming[key])
@@ -607,12 +614,15 @@ def create_episode_skeleton_plan(project: dict, episode_number: int, target_path
     title = str(episode.get("title") or chapter.get("title") or f"第 {episode_number} 章")
     volume = str(chapter.get("volume") or "")
     episode_id = project_episode_id(project, episode_number)
-    panels_per_page = 4
+    page_count = max(1, int(pages or 8))
+    planned_panels = max(0, int(episode.get("planned_panels") or 0))
+    base_panels, extra_panels = divmod(planned_panels, page_count) if planned_panels else (4, 0)
     page_items = []
-    for page_index in range(1, max(1, int(pages or 8)) + 1):
+    for page_index in range(1, page_count + 1):
         page_id = f"{episode_id}_P{page_index:03d}"
         panel_items = []
-        for panel_index in range(1, panels_per_page + 1):
+        panels_this_page = max(1, base_panels + (1 if page_index <= extra_panels else 0))
+        for panel_index in range(1, panels_this_page + 1):
             panel_id = f"{page_id}_PANEL{panel_index:02d}"
             panel_items.append({
                 "title": f"待细读分镜 {panel_index}",
@@ -853,12 +863,15 @@ def media_url(path: str | Path) -> str:
 def comfy_view_url(path: str | Path) -> str:
     if not path:
         return ""
+    config = runtime_config()
+    if normalize_backend(config.get("COMIC_PIPELINE_IMAGE_BACKEND")) != "comfyui":
+        return ""
     candidate = Path(path)
     try:
         rel = candidate.resolve().relative_to(comfy_output_root().resolve())
     except Exception:
         return ""
-    comfy_url = runtime_config().get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
+    comfy_url = config.get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
     filename = quote(rel.name)
     subfolder = quote(str(rel.parent).replace("\\", "/"))
     return f"{comfy_url}/view?filename={filename}&subfolder={subfolder}&type=output"
@@ -914,6 +927,51 @@ def expected_output_from_workflow(workflow: dict) -> str:
         if prefix:
             return str(comfy_output_root() / f"{prefix}_00001_.png")
     return ""
+
+
+def image_workflow_command(
+    project: dict,
+    workflow_path: str | Path,
+    output_path: str | Path,
+    result_path: str | Path,
+    shot_id: str,
+    poll_seconds: int = 5,
+    max_polls: int = 180,
+) -> tuple[str, list[str]]:
+    config = effective_config(project)
+    backend = normalize_backend(config.get("COMIC_PIPELINE_IMAGE_BACKEND"))
+    if backend == "direct_api":
+        if Path(output_path).suffix.lower() != ".png":
+            raise ValueError("direct image output path must be a PNG file")
+        return backend, [
+            config.get("COMIC_PIPELINE_PYTHON_PATH") or sys.executable,
+            str(IMAGE_PROVIDER_SCRIPT),
+            "--workflow-path",
+            str(workflow_path),
+            "--output-path",
+            str(output_path),
+            "--result-path",
+            str(result_path),
+            "--env-path",
+            config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or str(IMAGE_ENV_PATH),
+        ]
+    return backend, [
+        "powershell",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(RUN_IMAGE_WORKFLOW_SCRIPT),
+        "-WorkflowPath",
+        str(workflow_path),
+        "-ShotId",
+        shot_id,
+        "-ResultPath",
+        str(result_path),
+        "-PollSeconds",
+        str(int(poll_seconds)),
+        "-MaxPolls",
+        str(int(max_polls)),
+    ]
 
 
 def normalize_path(value: str | Path) -> str:
@@ -1086,8 +1144,18 @@ def read_optional_text(path: Path, limit: int = 12000) -> str:
 
 
 def preview_paths(episode_number: int) -> dict:
-    comfy_url = config_snapshot()["config"].get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
-    installed = Path(runtime_config().get("COMIC_PIPELINE_COMFY_ROOT", DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"]))
+    config = config_snapshot()["config"]
+    image_backend = normalize_backend(config.get("COMIC_PIPELINE_IMAGE_BACKEND"))
+    if image_backend != "comfyui":
+        return {
+            "backend": image_backend,
+            "latest_file": "",
+            "episode_file": "",
+            "latest_url": "",
+            "episode_url": "",
+        }
+    comfy_url = config.get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
+    installed = Path(config.get("COMIC_PIPELINE_COMFY_ROOT", DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"]))
     preview_dir = (
         installed
         / "custom_nodes"
@@ -1096,6 +1164,7 @@ def preview_paths(episode_number: int) -> dict:
         / "comic_previews"
     )
     return {
+        "backend": image_backend,
         "latest_file": str(preview_dir / "latest.html"),
         "episode_file": str(preview_dir / f"episode{episode_number:02d}.html"),
         "latest_url": f"{comfy_url}/extensions/comic_episode_pipeline_node/comic_previews/latest.html",
@@ -1508,8 +1577,8 @@ def classify_generation_issue(value: str) -> dict:
         return {
             "type": "backend_unreachable",
             "severity": "blocked",
-            "message": "生成后端连接失败，请检查 ComfyUI 是否运行。",
-            "action": "打开设置页检查或启动生成后端。",
+            "message": "图片生成后端连接失败，请检查当前后端的接口地址和运行状态。",
+            "action": "打开设置页检查所选图片后端；直连模式检查网络和接口地址，ComfyUI 模式检查本地服务。",
             "retry_hint": "后端恢复后重试",
             "cooldown_seconds": 0,
         }
@@ -3593,7 +3662,12 @@ def qa_report_ready(status: dict) -> bool:
 
 
 def generation_backend_ready(health: dict) -> bool:
-    return bool(health.get("ok") and health.get("image_api_key_configured"))
+    if "generation_ready" in health:
+        return bool(health.get("ok") and health.get("generation_ready"))
+    return bool(
+        health.get("ok")
+        and (health.get("image_backend") == "comfyui" or health.get("image_api_key_configured"))
+    )
 
 
 def global_asset_readiness(project: dict) -> dict:
@@ -3650,15 +3724,23 @@ def approval_gate_states(health: dict, detail: dict, status: dict, approvals: di
     chapter_coverage = chapter_asset_coverage(active_project(), detail_episode, detail.get("pages") or [])
     quality = generated_output_quality_status(active_project(), detail_episode)
     qa_ready = qa_report_ready(status)
-    paths_ok = all(item.get("exists") for item in health.get("paths", {}).values())
-    preflight_ready = bool(health.get("ok") and paths_ok and health.get("image_api_key_configured"))
+    image_backend = health.get("image_backend") or "direct_api"
+    image_api_required = image_backend == "direct_api"
+    paths_ok = all(
+        item.get("exists")
+        for key, item in health.get("paths", {}).items()
+        if key not in ({"image_env"} if image_backend == "comfyui" else {"comfy_root"})
+    )
+    preflight_ready = bool(generation_backend_ready(health) and paths_ok)
 
     if preflight_ready:
-        preflight = ("done", "就绪", "ComfyUI、节点、路径和 API Key 已通过检查。")
-    elif health.get("ok") and paths_ok:
+        backend_label = "ComfyUI" if image_backend == "comfyui" else "图片直连接口"
+        credential_label = "本地模型环境" if image_backend == "comfyui" else "API Key"
+        preflight = ("done", "就绪", f"{backend_label}、路径和{credential_label}已通过检查。")
+    elif image_api_required and health.get("ok") and paths_ok:
         preflight = ("attention", "需配置", "生成图片前还需要配置图片 API Key。")
     else:
-        preflight = ("attention", "需检查", "生成前需要检查 ComfyUI 连接、节点注册或本地路径。")
+        preflight = ("attention", "需检查", "生成前需要检查当前图片后端和本地路径。")
 
     if not pages:
         breakdown = ("ready", "可拆解", "选择小说与章节后，先生成页面摘要、分镜提示和审稿包。")
@@ -3699,7 +3781,7 @@ def approval_gate_states(health: dict, detail: dict, status: dict, approvals: di
     elif generation_backend_ready(health):
         generation = ("ready", "可生成", "后端已就绪，可以进入小批量生成。")
     else:
-        generation = ("blocked", "生成受阻", "生成需要 ComfyUI 可访问并配置图片 API Key。")
+        generation = ("blocked", "生成受阻", "生成需要当前图片后端就绪并配置图片 API Key。")
 
     if not approvals.get("generation"):
         qa_state = ("locked", "等待生成审核", "生成结果通过后再运行 QA。")
@@ -3799,8 +3881,10 @@ def assert_stage_allowed(stage: str, episode_number: int) -> None:
             raise ValueError(review_blocker_message(episode_number, blockers))
         health = comfy_health()
         if not health.get("ok"):
-            raise ValueError("生成漫画前需要 ComfyUI、节点注册和队列接口可访问。")
-        if not health.get("image_api_key_configured"):
+            if health.get("image_backend") == "comfyui":
+                raise ValueError("生成漫画前需要 ComfyUI、节点注册和队列接口可访问。")
+            raise ValueError("生成漫画前需要图片直连后端和 PostgreSQL 可用。")
+        if health.get("image_backend") != "comfyui" and not health.get("image_api_key_configured"):
             raise ValueError("生成漫画前需要在配置中填写图片 API Key。")
     if stage == "review":
         if not approvals.get("generation"):
@@ -3811,6 +3895,7 @@ def assert_stage_allowed(stage: str, episode_number: int) -> None:
 
 def agent_health_findings(health: dict) -> list[dict]:
     findings = []
+    image_backend = health.get("image_backend") or "direct_api"
     for key, check in health.get("checks", {}).items():
         findings.append(
             {
@@ -3825,12 +3910,17 @@ def agent_health_findings(health: dict) -> list[dict]:
             }
         )
     for key, item in health.get("paths", {}).items():
+        if image_backend == "direct_api" and key in {"comfy_root", "comfy_output_root"}:
+            continue
+        if image_backend == "comfyui" and key == "image_env":
+            continue
         findings.append(
             {
                 "label": {
                     "root": "项目目录",
                     "novel": "小说文件",
                     "comfy_root": "ComfyUI 根目录",
+                    "comfy_output_root": "ComfyUI 输出目录",
                     "output_root": "输出目录",
                     "image_env": "图片环境配置",
                 }.get(key, key),
@@ -3838,13 +3928,18 @@ def agent_health_findings(health: dict) -> list[dict]:
                 "detail": item.get("path", ""),
             }
         )
-    findings.append(
-        {
-            "label": "OpenAI API Key",
-            "ok": bool(health.get("image_api_key_configured")),
-            "detail": "已配置" if health.get("image_api_key_configured") else "未配置",
-        }
-    )
+    image_key_optional = image_backend == "comfyui"
+    findings.append({
+        "label": "图片 API Key",
+        "ok": bool(health.get("image_api_key_configured")) or image_key_optional,
+        "detail": (
+            "已配置"
+            if health.get("image_api_key_configured")
+            else "本地模型模式可选"
+            if image_key_optional
+            else "未配置"
+        ),
+    })
     return findings
 
 
@@ -3890,11 +3985,11 @@ def agent_recommendation(
                 "gate": "",
                 "target_module": "assets",
             }
-        if not health.get("image_api_key_configured"):
+        if not health.get("text_api_key_configured"):
             return {
                 "state": "blocked",
-                "title": "先配置图片 API Key",
-                "detail": "AI 拆解需要图片/文本模型配置。请先在配置区填写 OpenAI API Key。",
+                "title": "先配置小说处理 API Key",
+                "detail": "AI 拆解需要小说处理模型配置。请先在设置中填写小说处理 API Key。",
                 "stage": "",
                 "action_label": "填写配置",
                 "requires_approval": False,
@@ -3977,7 +4072,7 @@ def agent_recommendation(
             return {
                 "state": "blocked",
                 "title": "生成前需要修复后端配置",
-                "detail": "拆解与素材门禁已通过，但 ComfyUI 或图片 API Key 未就绪。审核可继续查看，生成会被阻止。",
+                "detail": "拆解与素材门禁已通过，但当前图片生成后端未就绪。审核可继续查看，生成会被阻止。",
                 "stage": "preflight",
                 "action_label": "运行预检",
                 "requires_approval": False,
@@ -4043,10 +4138,21 @@ def agent_recommendation(
             "gate": "qa",
         }
     next_number = next_episode_number(episode_number)
+    if not next_number:
+        return {
+            "state": "complete",
+            "title": "全书章节已完成",
+            "detail": "当前已是最后一个可识别章节，全部审核门禁已通过。",
+            "stage": "",
+            "action_label": "",
+            "requires_approval": False,
+            "gate": "",
+            "next_episode": 0,
+        }
     return {
         "state": "complete",
         "title": "当前章节可进入下一章",
-        "detail": f"审核门禁已通过。下一章：第 {next_number} 章" if next_number else "当前已是最后一个可识别章节。",
+        "detail": f"审核门禁已通过。下一章：第 {next_number} 章",
         "stage": "",
         "action_label": "进入下一章",
         "requires_approval": True,
@@ -4362,23 +4468,15 @@ def start_asset_regenerate_job(payload: dict) -> dict:
 
     job_id = f"{int(time.time() * 1000)}-{asset_id or safe_stem(alias)}-asset-regenerate"
     result_path = project_manifest_dir(project) / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{int(time.time())}.json"
-    cmd = [
-        "powershell",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(RUN_IMAGE_WORKFLOW_SCRIPT),
-        "-WorkflowPath",
-        str(workflow_path),
-        "-ShotId",
+    image_backend, cmd = image_workflow_command(
+        project,
+        workflow_path,
+        target,
+        result_path,
         alias,
-        "-ResultPath",
-        str(result_path),
-        "-PollSeconds",
-        str(int(payload.get("poll_seconds") or 5)),
-        "-MaxPolls",
-        str(int(payload.get("max_polls") or 180)),
-    ]
+        int(payload.get("poll_seconds") or 5),
+        int(payload.get("max_polls") or 180),
+    )
     job = {
         "id": job_id,
         "stage": "asset_regenerate",
@@ -4389,6 +4487,7 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         "asset_id": int(asset.get("id") or 0) if asset else 0,
         "asset_category": category,
         "asset_path": str(target),
+        "image_backend": image_backend,
         "workflow_path": str(workflow_path),
         "backup_path": backup_path,
         "status": "running",
@@ -4623,7 +4722,8 @@ def start_regenerate_job(payload: dict) -> dict:
     result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_console_regenerate_{int(time.time())}.json"
     project = active_project()
     generation_context = build_generation_context_snapshot(project, episode_number, page_id, [panel_id])
-    panel_path = str(panel_image_path(panel_id) or "")
+    workflow = read_optional_json(workflow_path) or {}
+    panel_path = str(panel_image_path(panel_id) or expected_output_from_workflow(workflow))
     previous_output = db.get_generated_output_by_path(database_url(), project["slug"], panel_path)
     previous_metadata = previous_output.get("metadata") if previous_output and isinstance(previous_output.get("metadata"), dict) else {}
     regenerate_reason = str(payload.get("reason") or previous_metadata.get("review_comment") or "").strip()
@@ -4640,23 +4740,15 @@ def start_regenerate_job(payload: dict) -> dict:
             job_id,
             {"panel_id": panel_id, "page_id": page_id},
         )
-    cmd = [
-        "powershell",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(RUN_IMAGE_WORKFLOW_SCRIPT),
-        "-WorkflowPath",
-        str(runtime_workflow_path),
-        "-ShotId",
+    image_backend, cmd = image_workflow_command(
+        project,
+        runtime_workflow_path,
+        panel_path,
+        result_path,
         panel_id,
-        "-ResultPath",
-        str(result_path),
-        "-PollSeconds",
-        str(int(payload.get("poll_seconds") or 5)),
-        "-MaxPolls",
-        str(int(payload.get("max_polls") or 180)),
-    ]
+        int(payload.get("poll_seconds") or 5),
+        int(payload.get("max_polls") or 180),
+    )
     job = {
         "id": job_id,
         "stage": "regenerate",
@@ -4669,6 +4761,7 @@ def start_regenerate_job(payload: dict) -> dict:
         "runtime_workflow_path": str(runtime_workflow_path),
         "backup_path": backup_path,
         "panel_path": panel_path,
+        "image_backend": image_backend,
         "previous_output_id": previous_output.get("id") if previous_output else "",
         "regenerate_reason": regenerate_reason,
         "generation_context": generation_context,
@@ -4956,6 +5049,7 @@ def run_regenerate_page_job(job_id: str) -> None:
         "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": config.get("COMIC_PIPELINE_COMFY_OUTPUT_ROOT", ""),
         "COMIC_PIPELINE_OUTPUT_ROOT": config.get("COMIC_PIPELINE_OUTPUT_ROOT", ""),
         "COMIC_PIPELINE_IMAGE_ENV_PATH": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH", ""),
+        "COMIC_PIPELINE_IMAGE_BACKEND": config.get("COMIC_PIPELINE_IMAGE_BACKEND", "direct_api"),
         "COMIC_PIPELINE_IMAGE_MODEL": config.get("COMIC_PIPELINE_IMAGE_MODEL", ""),
         "COMIC_PIPELINE_PYTHON_PATH": config.get("COMIC_PIPELINE_PYTHON_PATH", ""),
         "PYTHONIOENCODING": "utf-8",
@@ -4973,6 +5067,8 @@ def run_regenerate_page_job(job_id: str) -> None:
         workflow_path = workflow_path_for_panel(panel_id)
         runtime_workflow_path = inject_generation_context_into_workflow(workflow_path, job.get("generation_context") or {}, job_id, panel_id)
         panel_result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_page_regenerate_{int(time.time())}.json"
+        workflow = read_optional_json(runtime_workflow_path) or {}
+        panel_target_path = panel_image_path(panel_id) or Path(expected_output_from_workflow(workflow))
         backup_path = ""
         previous_output = db.get_generated_output_by_path(database_url(), project["slug"], str(panel_image_path(panel_id) or ""))
         if panel_image_path(panel_id):
@@ -4986,23 +5082,13 @@ def run_regenerate_page_job(job_id: str) -> None:
                 job_id,
                 {"panel_id": panel_id, "page_id": page_id},
             )
-        cmd = [
-            "powershell",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(RUN_IMAGE_WORKFLOW_SCRIPT),
-            "-WorkflowPath",
-            str(runtime_workflow_path),
-            "-ShotId",
+        image_backend, cmd = image_workflow_command(
+            project,
+            runtime_workflow_path,
+            panel_target_path,
+            panel_result_path,
             panel_id,
-            "-ResultPath",
-            str(panel_result_path),
-            "-PollSeconds",
-            "5",
-            "-MaxPolls",
-            "180",
-        ]
+        )
         command_log.append(cmd)
         completed = run_job_process(job_id, cmd, env)
         if was_job_cancelled(job_id):
@@ -5016,6 +5102,8 @@ def run_regenerate_page_job(job_id: str) -> None:
             "workflow_path": str(workflow_path),
             "runtime_workflow_path": str(runtime_workflow_path),
             "result_path": str(panel_result_path),
+            "image_backend": image_backend,
+            "panel_path": str(panel_target_path),
             "backup_path": backup_path,
             "previous_output_id": previous_output.get("id") if previous_output else "",
             "exit_code": completed.returncode,
@@ -5100,7 +5188,8 @@ def comfy_health() -> dict:
         active = {}
     effective = effective_config(active) if active else config
     sources = effective_config_sources(active) if active else {}
-    comfy_url = config.get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
+    image_backend = normalize_backend(effective.get("COMIC_PIPELINE_IMAGE_BACKEND"))
+    comfy_url = effective.get("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
     checks = {}
     endpoints = {
         "root": "/",
@@ -5116,28 +5205,50 @@ def comfy_health() -> dict:
         except Exception as exc:
             return name, {"ok": False, "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
-        futures = [pool.submit(check_endpoint, name, endpoint) for name, endpoint in endpoints.items()]
-        for future in as_completed(futures):
-            name, result = future.result()
-            checks[name] = result
+    if image_backend == "comfyui":
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+            futures = [pool.submit(check_endpoint, name, endpoint) for name, endpoint in endpoints.items()]
+            for future in as_completed(futures):
+                name, result = future.result()
+                checks[name] = result
 
     text_key_path = Path(config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH)
     image_key_path = Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
     text = read_env(text_key_path)
     image = read_env(image_key_path)
     database = db.status(config.get("COMIC_PIPELINE_DATABASE_URL", ""))
+    comfy_root_value = str(config.get("COMIC_PIPELINE_COMFY_ROOT") or "").strip()
+    comfy_output_value = str(config.get("COMIC_PIPELINE_COMFY_OUTPUT_ROOT") or "").strip()
+    comfy_root_exists = bool(comfy_root_value and Path(comfy_root_value).is_dir())
+    comfy_output_exists = bool(comfy_output_value and Path(comfy_output_value).is_dir())
+    output_root_value = str(effective.get("COMIC_PIPELINE_OUTPUT_ROOT") or "").strip()
+    output_root_error = ""
+    if image_backend == "direct_api" and output_root_value:
+        try:
+            Path(output_root_value).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            output_root_error = str(exc)
+    output_root_exists = bool(output_root_value and Path(output_root_value).is_dir())
+    generation_ready = (
+        all(item.get("ok") for item in checks.values()) and comfy_root_exists and comfy_output_exists
+        if image_backend == "comfyui"
+        else bool(image.get("OPENAI_API_KEY", "").strip()) and output_root_exists
+    )
     return {
         "comfy_url": comfy_url,
+        "image_backend": image_backend,
         "checks": checks,
-        "ok": all(item.get("ok") for item in checks.values()) and database.get("schema_ready"),
+        "generation_ready": generation_ready,
+        "ok": bool(database.get("schema_ready")) and generation_ready,
         "paths": {
             "root": {"path": str(ROOT), "exists": ROOT.is_dir()},
             "novel": {"path": config.get("COMIC_PIPELINE_NOVEL_PATH", ""), "exists": Path(config.get("COMIC_PIPELINE_NOVEL_PATH", "")).is_file()},
-            "comfy_root": {"path": config.get("COMIC_PIPELINE_COMFY_ROOT", ""), "exists": Path(config.get("COMIC_PIPELINE_COMFY_ROOT", "")).is_dir()},
+            "comfy_root": {"path": comfy_root_value, "exists": comfy_root_exists},
+            "comfy_output_root": {"path": comfy_output_value, "exists": comfy_output_exists},
             "output_root": {
-                "path": effective.get("COMIC_PIPELINE_OUTPUT_ROOT", ""),
-                "exists": Path(effective.get("COMIC_PIPELINE_OUTPUT_ROOT", "")).is_dir(),
+                "path": output_root_value,
+                "exists": output_root_exists,
+                "error": output_root_error,
                 "source": sources.get("output_root", "global"),
                 "global_path": config.get("COMIC_PIPELINE_OUTPUT_ROOT", ""),
             },
@@ -5175,6 +5286,27 @@ def tail_text(path: Path, max_chars: int = 4000) -> str:
 
 def comfy_runtime_diagnostics() -> dict:
     config = config_snapshot()["config"]
+    health = comfy_health()
+    if health.get("image_backend") == "direct_api":
+        image_env_path = Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
+        image = read_env(image_env_path)
+        configured = bool(image.get("OPENAI_API_KEY", "").strip())
+        return {
+            "ok": bool(health.get("generation_ready") and configured),
+            "image_backend": "direct_api",
+            "start_not_required": True,
+            "start_supported": False,
+            "health": health,
+            "provider": {
+                "base_url": image.get("OPENAI_BASE_URL", ""),
+                "api_key_configured": configured,
+                "env_path": str(image_env_path),
+            },
+            "paths": {},
+            "logs": {},
+            "start_command": {},
+            "start_blocker": "直连 API 模式无需启动独立生成后端。",
+        }
     comfy_root = Path(config.get("COMIC_PIPELINE_COMFY_ROOT") or DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"])
     comfy_url = (config.get("COMIC_PIPELINE_COMFY_URL") or DEFAULTS["COMIC_PIPELINE_COMFY_URL"]).rstrip("/")
     host, port = url_host_port(comfy_url)
@@ -5184,7 +5316,6 @@ def comfy_runtime_diagnostics() -> dict:
     windows_python_from_linux = os.name != "nt" and venv_python.is_file() and venv_python.suffix.lower() == ".exe"
     out_log = LOG_DIR / "generation-backend.out.log"
     err_log = LOG_DIR / "generation-backend.err.log"
-    health = comfy_health()
     models_root = comfy_root / "models"
     model_dirs = {
         "checkpoints": models_root / "checkpoints",
@@ -5194,7 +5325,8 @@ def comfy_runtime_diagnostics() -> dict:
         "controlnet": models_root / "controlnet",
     }
     return {
-        "ok": bool(health.get("ok")),
+        "ok": bool(health.get("generation_ready")),
+        "image_backend": "comfyui",
         "comfy_url": comfy_url,
         "host": host,
         "port": port,
@@ -5239,6 +5371,17 @@ def comfy_runtime_diagnostics() -> dict:
 
 def start_generation_backend_api(payload: dict | None = None) -> dict:
     before = comfy_runtime_diagnostics()
+    if before.get("image_backend") == "direct_api":
+        return {
+            "ok": bool(before.get("ok")),
+            "started": False,
+            "message": (
+                "直连 API 模式无需启动独立生成后端。"
+                if before.get("ok")
+                else "直连 API 模式无需启动服务，请先配置并测试图片 API。"
+            ),
+            "diagnostics": before,
+        }
     if before.get("ok"):
         return {"ok": True, "started": False, "message": "生成后端已经可访问。", "diagnostics": before}
     if not before.get("start_supported", True):
@@ -5401,6 +5544,7 @@ def settings_summary() -> dict:
     text = snapshot.get("text", {})
     image = snapshot.get("image", {})
     return {
+        "image_backend": normalize_backend(effective.get("COMIC_PIPELINE_IMAGE_BACKEND")),
         "models": {
             "novel_model": effective.get("COMIC_PIPELINE_TEXT_MODEL", ""),
             "novel_timeout": effective.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT", ""),
@@ -5454,6 +5598,8 @@ def settings_summary() -> dict:
 def health_check_summary() -> dict:
     health = comfy_health()
     settings = settings_summary()
+    image_backend = settings.get("image_backend") or "direct_api"
+    image_api_required = image_backend == "direct_api"
     output_root_path = settings.get("paths", {}).get("output_root", "")
     checks = [
         {
@@ -5463,10 +5609,21 @@ def health_check_summary() -> dict:
             "message": "连接正常" if health.get("database", {}).get("schema_ready") else (health.get("database", {}).get("error") or "数据库未就绪"),
         },
         {
-            "name": "comfyui",
-            "label": "ComfyUI",
-            "ok": bool(health.get("ok")),
-            "message": "生成后端可访问" if health.get("ok") else "生成后端不可访问或队列接口异常",
+            "name": "image_backend",
+            "label": "图片生成后端",
+            "ok": bool(health.get("generation_ready")),
+            "message": (
+                "直连 API 模式已就绪"
+                if health.get("generation_ready") and image_backend == "direct_api"
+                else "ComfyUI 可访问"
+                if health.get("generation_ready")
+                else "直连 API 未就绪，请配置图片 API Key"
+                if image_backend == "direct_api"
+                else "ComfyUI 输出目录未挂载"
+                if not health.get("paths", {}).get("comfy_root", {}).get("exists")
+                or not health.get("paths", {}).get("comfy_output_root", {}).get("exists")
+                else "ComfyUI 不可访问"
+            ),
             "detail": health.get("checks", {}),
         },
         {
@@ -5478,8 +5635,14 @@ def health_check_summary() -> dict:
         {
             "name": "image_api_key",
             "label": "图片 API Key",
-            "ok": bool(health.get("image_api_key_configured")),
-            "message": "已配置" if health.get("image_api_key_configured") else "未配置图片 API Key",
+            "ok": bool(health.get("image_api_key_configured")) or not image_api_required,
+            "message": (
+                "已配置"
+                if health.get("image_api_key_configured")
+                else "ComfyUI 本地模型模式无需配置"
+                if not image_api_required
+                else "未配置图片 API Key"
+            ),
         },
         {
             "name": "output_root",
@@ -5498,8 +5661,10 @@ def health_check_summary() -> dict:
         {
             "name": "image_model",
             "label": "图片生成模型",
-            "ok": bool(settings.get("models", {}).get("image_model")),
-            "message": settings.get("models", {}).get("image_model") or "未配置",
+            "ok": bool(settings.get("models", {}).get("image_model")) or not image_api_required,
+            "message": settings.get("models", {}).get("image_model") or (
+                "由 ComfyUI 工作流选择本地模型" if not image_api_required else "未配置"
+            ),
             "source": settings.get("models", {}).get("sources", {}).get("image_model", "global"),
         },
     ]
@@ -5538,13 +5703,7 @@ def call_image_model_test(model: str, base_url: str, image_env_path: str, timeou
     api_key = str(image_env.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("图片生成 API Key 未配置")
-    endpoint = str(base_url or "").strip().rstrip("/")
-    if endpoint.endswith("/images/generations"):
-        url = endpoint
-    elif endpoint.endswith("/v1"):
-        url = endpoint + "/images/generations"
-    else:
-        url = endpoint + "/v1/images/generations"
+    url = image_api_url(str(base_url or "").strip(), "images/generations")
     payload = {
         "model": model,
         "prompt": "A simple black ink circle on a plain white background, no text.",
@@ -5559,6 +5718,7 @@ def call_image_model_test(model: str, base_url: str, image_env_path: str, timeou
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "ComicPipeline/2.0",
         },
         method="POST",
     )
@@ -5626,19 +5786,41 @@ def test_model_api(payload: dict) -> dict:
 
     model = settings.get("models", {}).get("image_model", "")
     base_url = settings.get("endpoints", {}).get("image_base_url", "")
+    image_backend = settings.get("image_backend") or health.get("image_backend") or "direct_api"
     object_info = health.get("checks", {}).get("object_info", {})
     node_registered = bool(object_info.get("ok"))
     problems = []
+    if image_backend == "comfyui":
+        if not health.get("generation_ready", health.get("ok")):
+            problems.append("ComfyUI 不可访问")
+        if not node_registered:
+            problems.append("ComfyUI 节点接口不可访问")
+        ok = not problems
+        return {
+            "ok": ok,
+            "target": "image",
+            "dry_run": True,
+            "model": model,
+            "base_url": base_url,
+            "message": (
+                "ComfyUI 本地模型环境检查通过，具体模型由工作流选择。"
+                if ok
+                else "ComfyUI 本地模型环境检查未通过：" + "、".join(problems)
+            ),
+            "detail": {
+                "image_backend": image_backend,
+                "comfy_url": health.get("comfy_url", ""),
+                "node_registered": node_registered,
+                "image_api_key_configured": bool(health.get("image_api_key_configured")),
+                "generates_image": False,
+            },
+        }
     if not model:
         problems.append("图片生成模型未配置")
     if not base_url:
         problems.append("图片生成接口地址未配置")
     if not health.get("image_api_key_configured"):
         problems.append("图片生成 API Key 未配置")
-    if not health.get("ok"):
-        problems.append("ComfyUI 不可访问")
-    if not node_registered:
-        problems.append("ComfyUI 节点注册状态不可确认")
     ok = not problems
     live = bool(payload.get("live"))
     if ok and live:
@@ -5658,8 +5840,7 @@ def test_model_api(payload: dict) -> dict:
                 "message": f"图片生成业务调用成功，耗时 {result.get('elapsed_seconds')} 秒；测试图未保存。",
                 "detail": {
                     **result,
-                    "comfy_url": health.get("comfy_url", ""),
-                    "node_registered": node_registered,
+                    "image_backend": image_backend,
                 },
             }
         except Exception as exc:
@@ -5671,8 +5852,7 @@ def test_model_api(payload: dict) -> dict:
                 "base_url": base_url,
                 "message": f"图片生成业务调用失败：{exc}",
                 "detail": {
-                    "comfy_url": health.get("comfy_url", ""),
-                    "node_registered": node_registered,
+                    "image_backend": image_backend,
                     "generates_image": True,
                 },
             }
@@ -5684,8 +5864,7 @@ def test_model_api(payload: dict) -> dict:
         "base_url": base_url,
         "message": "图片生成模型配置检查通过。本测试不生成图片，不消耗图片额度。" if ok else "图片生成模型配置检查未通过：" + "、".join(problems),
         "detail": {
-            "comfy_url": health.get("comfy_url", ""),
-            "node_registered": node_registered,
+            "image_backend": image_backend,
             "image_api_key_configured": bool(health.get("image_api_key_configured")),
             "generates_image": False,
         },
@@ -6362,11 +6541,11 @@ def dashboard_todos(project: dict, health: dict, jobs: list[dict], limit: int = 
     todos: list[dict] = []
     output_blockers_by_episode: dict[int, dict] = {}
 
-    if not health.get("ok") or not health.get("image_api_key_configured"):
+    if not generation_backend_ready(health):
         missing = []
         if not health.get("ok"):
             missing.append("生成后端不可访问")
-        if not health.get("image_api_key_configured"):
+        if health.get("image_backend") != "comfyui" and not health.get("image_api_key_configured"):
             missing.append("图片 API Key 未配置")
         todos.append(make_dashboard_todo(
             "system-preflight",
@@ -6530,16 +6709,17 @@ def dashboard_todos(project: dict, health: dict, jobs: list[dict], limit: int = 
                 ))
             if active_episode.get("qa") and not active_episode.get("next_episode"):
                 next_episode = next_episode_number(episode)
-                todos.append(make_dashboard_todo(
-                    f"next-{episode}",
-                    "next",
-                    f"{episode_display(episode)}可以进入下一章",
-                    f"QA 已通过，建议进入 {episode_display(next_episode)}。",
-                    "进入下一章",
-                    {"module": "workflow", "tab": "source", "episode": next_episode},
-                    "next",
-                    1,
-                ))
+                if next_episode:
+                    todos.append(make_dashboard_todo(
+                        f"next-{episode}",
+                        "next",
+                        f"{episode_display(episode)}可以进入下一章",
+                        f"QA 已通过，建议进入 {episode_display(next_episode)}。",
+                        "进入下一章",
+                        {"module": "workflow", "tab": "source", "episode": next_episode},
+                        "next",
+                        1,
+                    ))
         except Exception as exc:
             todos.append(make_dashboard_todo(
                 f"episode-diagnostic-{episode}",
@@ -6591,12 +6771,21 @@ def dashboard() -> dict:
         },
         "system_status": {
             "database": health.get("database", {}),
+            "image_backend": {
+                "type": health.get("image_backend", "direct_api"),
+                "ok": bool(health.get("generation_ready")),
+                "url": health.get("comfy_url", "") if health.get("image_backend") == "comfyui" else "",
+                "checks": health.get("checks", {}),
+            },
             "comfyui": {
-                "ok": bool(health.get("ok")),
+                "ok": bool(health.get("generation_ready")) if health.get("image_backend") == "comfyui" else True,
                 "url": health.get("comfy_url", ""),
                 "checks": health.get("checks", {}),
             },
-            "api_key": {"configured": bool(health.get("image_api_key_configured"))},
+            "api_key": {
+                "configured": bool(health.get("image_api_key_configured")),
+                "required": health.get("image_backend") != "comfyui",
+            },
             "text_api_key": {"configured": bool(health.get("text_api_key_configured"))},
             "image_api_key": {"configured": bool(health.get("image_api_key_configured"))},
         },
@@ -9241,6 +9430,7 @@ def run_job(job_id: str) -> None:
         "COMIC_PIPELINE_NOVEL_PATH": project.get("novel_path") or config.get("COMIC_PIPELINE_NOVEL_PATH", ""),
         "COMIC_PIPELINE_TEXT_ENV_PATH": config.get("COMIC_PIPELINE_TEXT_ENV_PATH", ""),
         "COMIC_PIPELINE_IMAGE_ENV_PATH": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH", ""),
+        "COMIC_PIPELINE_IMAGE_BACKEND": config.get("COMIC_PIPELINE_IMAGE_BACKEND", "direct_api"),
         "COMIC_PIPELINE_TEXT_MODEL": config.get("COMIC_PIPELINE_TEXT_MODEL", ""),
         "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": config.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT", ""),
         "COMIC_PIPELINE_TEXT_MODEL_STREAM": config.get("COMIC_PIPELINE_TEXT_MODEL_STREAM", ""),

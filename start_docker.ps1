@@ -2,6 +2,8 @@ param(
     [switch]$Build,
     [switch]$SkipHealthCheck,
     [switch]$SkipGenerationBackend,
+    [ValidateSet("direct_api", "comfyui")]
+    [string]$ImageBackend = "direct_api",
     [string]$ComfyRoot = "G:\ComfyUI",
     [string]$ComfyUrl = "http://127.0.0.1:8188"
 )
@@ -37,6 +39,29 @@ function Copy-ExampleIfMissing {
     Write-Host "$Label created from example: $TargetPath"
 }
 
+function Set-EnvValue {
+    param(
+        [string]$Path,
+        [string]$Key,
+        [string]$Value
+    )
+    $lines = if (Test-Path -LiteralPath $Path) { @(Get-Content -LiteralPath $Path) } else { @() }
+    $prefix = "$Key="
+    $found = $false
+    $updated = @($lines | ForEach-Object {
+        if ($_.StartsWith($prefix)) {
+            $found = $true
+            "$prefix$Value"
+        } else {
+            $_
+        }
+    })
+    if (-not $found) {
+        $updated += "$prefix$Value"
+    }
+    $updated | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
 function Test-PortListening {
     param([int]$Port)
     $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -54,6 +79,10 @@ function Test-HttpReady {
 }
 
 function Start-GenerationBackend {
+    if ($ImageBackend -ne "comfyui") {
+        Write-Host "Direct image API selected; ComfyUI autostart is not required."
+        return
+    }
     if ($SkipGenerationBackend) {
         Write-Host "Generation backend autostart skipped."
         return
@@ -117,6 +146,14 @@ Copy-ExampleIfMissing `
     -TargetPath (Join-Path $root "config\image.env") `
     -Label "Image API config"
 
+$dockerConfigPath = Join-Path $root "config\.env.docker"
+$containerOutputRoot = if ($ImageBackend -eq "comfyui") { "/comfyui/output" } else { "/app/output" }
+Set-EnvValue -Path $dockerConfigPath -Key "COMIC_PIPELINE_IMAGE_BACKEND" -Value $ImageBackend
+Set-EnvValue -Path $dockerConfigPath -Key "COMIC_PIPELINE_COMFY_ROOT" -Value "/comfyui"
+Set-EnvValue -Path $dockerConfigPath -Key "COMIC_PIPELINE_COMFY_URL" -Value "http://host.docker.internal:$(([Uri]$ComfyUrl).Port)"
+Set-EnvValue -Path $dockerConfigPath -Key "COMIC_PIPELINE_COMFY_OUTPUT_ROOT" -Value $containerOutputRoot
+Set-EnvValue -Path $dockerConfigPath -Key "COMIC_PIPELINE_OUTPUT_ROOT" -Value "$containerOutputRoot/ComicPipeline"
+
 Start-GenerationBackend
 
 $existingConsole = docker ps --format "{{.Names}}" | Where-Object { $_ -eq "comic-pipeline-console" }
@@ -124,7 +161,12 @@ if (-not $existingConsole -and (Test-PortListening -Port 8199)) {
     throw "Port 8199 is already in use. Stop the existing local console first, then run this script again."
 }
 
-$composeArgs = @("compose", "up", "-d")
+$composeArgs = @("compose", "-f", (Join-Path $root "docker-compose.yml"))
+if ($ImageBackend -eq "comfyui") {
+    $env:COMIC_PIPELINE_HOST_COMFY_ROOT = $ComfyRoot.Replace("\", "/")
+    $composeArgs += @("-f", (Join-Path $root "docker-compose.comfyui.yml"))
+}
+$composeArgs += @("up", "-d")
 if ($Build) {
     $composeArgs += "--build"
 }
@@ -137,7 +179,10 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "Console URL: http://127.0.0.1:8199"
 Write-Host "PostgreSQL URL from host: postgresql://comic_pipeline:comic_pipeline@127.0.0.1:55432/comic_pipeline"
-Write-Host "ComfyUI backend expected at: $ComfyUrl"
+Write-Host "Image backend: $ImageBackend"
+if ($ImageBackend -eq "comfyui") {
+    Write-Host "ComfyUI backend expected at: $ComfyUrl"
+}
 Write-Host ""
 
 if (-not $SkipHealthCheck) {

@@ -199,8 +199,11 @@ def check_image_file(
     if width < min_width or height < min_height:
         result["issues"].append(issue(page_id, panel_id, f"{image_kind}_image_too_small", f"{path} {width}x{height}"))
     if expected_size and (width, height) != expected_size:
-        result["issues"].append(
-            issue(page_id, panel_id, f"{image_kind}_image_size_mismatch", f"{path} actual={width}x{height} expected={expected_size[0]}x{expected_size[1]}")
+        size_delta = max(abs(width - expected_size[0]), abs(height - expected_size[1]))
+        target = result["warnings"] if size_delta <= 1 else result["issues"]
+        code = f"{image_kind}_image_size_variance" if size_delta <= 1 else f"{image_kind}_image_size_mismatch"
+        target.append(
+            issue(page_id, panel_id, code, f"{path} actual={width}x{height} expected={expected_size[0]}x{expected_size[1]}")
         )
     if int(metrics["bytes"]) < min_bytes:
         result["warnings"].append(issue(page_id, panel_id, f"{image_kind}_image_file_small", f"{path} bytes={metrics['bytes']}"))

@@ -25,6 +25,279 @@ def load_server_module():
 
 
 class RuntimeConfigTest(unittest.TestCase):
+    def test_database_url_uses_global_runtime_config(self):
+        server = load_server_module()
+
+        with patch.object(server, "runtime_config", return_value={
+            "COMIC_PIPELINE_DATABASE_URL": "postgresql://db.example/comics",
+        }):
+            self.assertEqual(server.database_url(), "postgresql://db.example/comics")
+
+    def test_image_workflow_command_defaults_to_direct_api(self):
+        server = load_server_module()
+        config = {
+            "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+            "COMIC_PIPELINE_PYTHON_PATH": "python-direct",
+            "COMIC_PIPELINE_IMAGE_ENV_PATH": "/config/image.env",
+        }
+
+        with patch.object(server, "effective_config", return_value=config):
+            backend, command = server.image_workflow_command(
+                {"slug": "test"},
+                Path("workflow.json"),
+                Path("panel.png"),
+                Path("result.json"),
+                "PANEL01",
+            )
+
+        self.assertEqual(backend, "direct_api")
+        self.assertEqual(command[0], "python-direct")
+        self.assertIn(str(server.IMAGE_PROVIDER_SCRIPT), command)
+        self.assertEqual(command[command.index("--output-path") + 1], "panel.png")
+        self.assertNotIn("8188", " ".join(command))
+
+    def test_image_workflow_command_keeps_comfyui_runner(self):
+        server = load_server_module()
+        config = {"COMIC_PIPELINE_IMAGE_BACKEND": "comfyui"}
+
+        with patch.object(server, "effective_config", return_value=config):
+            backend, command = server.image_workflow_command(
+                {"slug": "test"},
+                Path("workflow.json"),
+                Path("panel.png"),
+                Path("result.json"),
+                "PANEL01",
+                poll_seconds=9,
+                max_polls=12,
+            )
+
+        self.assertEqual(backend, "comfyui")
+        self.assertIn(str(server.RUN_IMAGE_WORKFLOW_SCRIPT), command)
+        self.assertEqual(command[command.index("-PollSeconds") + 1], "9")
+        self.assertEqual(command[command.index("-MaxPolls") + 1], "12")
+
+    def test_direct_image_workflow_command_rejects_empty_output_path(self):
+        server = load_server_module()
+        config = {"COMIC_PIPELINE_IMAGE_BACKEND": "direct_api"}
+
+        with patch.object(server, "effective_config", return_value=config):
+            with self.assertRaisesRegex(ValueError, "output path"):
+                server.image_workflow_command(
+                    {"slug": "test"},
+                    Path("workflow.json"),
+                    Path(""),
+                    Path("result.json"),
+                    "PANEL01",
+                )
+
+    def test_direct_api_health_does_not_probe_comfyui(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_env = root / "image.env"
+            image_env.write_text("OPENAI_API_KEY=test-key\n", encoding="utf-8")
+            config = {
+                **server.DEFAULTS,
+                "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+                "COMIC_PIPELINE_IMAGE_ENV_PATH": str(image_env),
+                "COMIC_PIPELINE_OUTPUT_ROOT": str(root / "output"),
+            }
+
+            with patch.object(server, "config_snapshot", return_value={"config": config}):
+                with patch.object(server, "active_project", side_effect=ValueError("no project")):
+                    with patch.object(server.db, "status", return_value={"schema_ready": True}):
+                        with patch.object(server.urllib.request, "urlopen") as urlopen:
+                            health = server.comfy_health()
+
+        self.assertTrue(health["ok"])
+        self.assertEqual(health["image_backend"], "direct_api")
+        self.assertEqual(health["checks"], {})
+        self.assertTrue(health["paths"]["output_root"]["exists"])
+        urlopen.assert_not_called()
+
+    def test_direct_api_status_does_not_publish_comfyui_preview_urls(self):
+        server = load_server_module()
+        config = {
+            **server.DEFAULTS,
+            "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+            "COMIC_PIPELINE_COMFY_URL": "http://127.0.0.1:8188",
+        }
+
+        with patch.object(server, "config_snapshot", return_value={"config": config}):
+            preview = server.preview_paths(3)
+
+        self.assertEqual(preview["backend"], "direct_api")
+        self.assertEqual(preview["latest_file"], "")
+        self.assertEqual(preview["episode_file"], "")
+        self.assertEqual(preview["latest_url"], "")
+        self.assertEqual(preview["episode_url"], "")
+
+    def test_direct_api_media_does_not_publish_comfyui_view_url(self):
+        server = load_server_module()
+
+        with patch.object(server, "runtime_config", return_value={
+            "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+            "COMIC_PIPELINE_COMFY_URL": "http://127.0.0.1:8188",
+        }):
+            url = server.comfy_view_url(ROOT / "output" / "panel.png")
+
+        self.assertEqual(url, "")
+
+    def test_connection_failure_diagnostic_is_backend_neutral(self):
+        server = load_server_module()
+
+        issue = server.classify_generation_issue("connection refused")
+
+        self.assertEqual(issue["type"], "backend_unreachable")
+        self.assertIn("当前后端", issue["message"])
+        self.assertNotIn("检查 ComfyUI 是否运行", issue["message"])
+
+    def test_direct_api_agent_findings_hide_optional_comfyui_paths(self):
+        server = load_server_module()
+        health = {
+            "image_backend": "direct_api",
+            "paths": {
+                "root": {"path": "/app", "exists": True},
+                "output_root": {"path": "/app/output", "exists": True},
+                "comfy_root": {"path": "/comfyui", "exists": False},
+                "comfy_output_root": {"path": "/comfyui/output", "exists": False},
+            },
+            "image_api_key_configured": True,
+        }
+
+        findings = server.agent_health_findings(health)
+        labels = {item["label"] for item in findings}
+
+        self.assertNotIn("ComfyUI 根目录", labels)
+        self.assertNotIn("ComfyUI 输出目录", labels)
+        self.assertIn("输出目录", labels)
+
+    def test_health_summary_keeps_image_backend_independent_from_database(self):
+        server = load_server_module()
+        health = {
+            "ok": False,
+            "image_backend": "direct_api",
+            "generation_ready": True,
+            "checks": {},
+            "database": {"schema_ready": False, "error": "database unavailable"},
+            "text_api_key_configured": True,
+            "image_api_key_configured": True,
+        }
+        settings = {
+            "image_backend": "direct_api",
+            "models": {
+                "novel_model": "text-model",
+                "image_model": "image-model",
+                "sources": {},
+            },
+            "paths": {"output_root": str(ROOT), "sources": {}},
+        }
+
+        with patch.object(server, "comfy_health", return_value=health):
+            with patch.object(server, "settings_summary", return_value=settings):
+                with patch.object(server, "example_consistency_checks", return_value=[]):
+                    result = server.health_check_summary()
+
+        checks = {item["name"]: item for item in result["checks"]}
+        self.assertFalse(checks["postgres"]["ok"])
+        self.assertTrue(checks["image_backend"]["ok"])
+        self.assertIn("直连 API", checks["image_backend"]["message"])
+
+    def test_comfyui_health_does_not_require_cloud_image_credentials(self):
+        server = load_server_module()
+        health = {
+            "ok": True,
+            "image_backend": "comfyui",
+            "generation_ready": True,
+            "checks": {"root": {"ok": True}},
+            "database": {"schema_ready": True},
+            "text_api_key_configured": True,
+            "image_api_key_configured": False,
+        }
+        settings = {
+            "image_backend": "comfyui",
+            "models": {
+                "novel_model": "text-model",
+                "image_model": "",
+                "sources": {},
+            },
+            "paths": {"output_root": str(ROOT), "sources": {}},
+        }
+
+        with patch.object(server, "comfy_health", return_value=health):
+            with patch.object(server, "settings_summary", return_value=settings):
+                with patch.object(server, "example_consistency_checks", return_value=[]):
+                    result = server.health_check_summary()
+
+        checks = {item["name"]: item for item in result["checks"]}
+        self.assertTrue(checks["image_api_key"]["ok"])
+        self.assertTrue(checks["image_model"]["ok"])
+        self.assertTrue(result["ok"])
+
+    def test_comfyui_health_requires_shared_output_mount(self):
+        server = load_server_module()
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = {
+                **server.DEFAULTS,
+                "COMIC_PIPELINE_IMAGE_BACKEND": "comfyui",
+                "COMIC_PIPELINE_COMFY_ROOT": str(root / "missing-comfyui"),
+                "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(root / "missing-output"),
+            }
+            with patch.object(server, "config_snapshot", return_value={"config": config}):
+                with patch.object(server, "active_project", side_effect=ValueError("no project")):
+                    with patch.object(server.db, "status", return_value={"schema_ready": True}):
+                        with patch.object(server.urllib.request, "urlopen", return_value=Response()):
+                            health = server.comfy_health()
+
+        self.assertTrue(all(item["ok"] for item in health["checks"].values()))
+        self.assertFalse(health["paths"]["comfy_root"]["exists"])
+        self.assertFalse(health["paths"]["comfy_output_root"]["exists"])
+        self.assertFalse(health["generation_ready"])
+        self.assertFalse(health["ok"])
+
+    def test_save_config_rejects_unknown_image_backend_before_writing(self):
+        server = load_server_module()
+
+        with patch.object(server, "config_snapshot", return_value={"config": dict(server.DEFAULTS)}):
+            with patch.object(server, "write_env") as write_env:
+                with self.assertRaisesRegex(ValueError, "direct_api.*comfyui"):
+                    server.save_config({
+                        "config": {"COMIC_PIPELINE_IMAGE_BACKEND": "automatic"},
+                    })
+
+        write_env.assert_not_called()
+
+    def test_episode_skeleton_uses_planned_panel_count(self):
+        server = load_server_module()
+        project = {"slug": "test", "title": "测试项目"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "episode02.json"
+            with patch.object(server, "project_episode_record", return_value={
+                "chapter_number": 2,
+                "title": "第二章",
+                "planned_pages": 1,
+                "planned_panels": 1,
+            }):
+                with patch.object(server, "project_chapter_record", return_value={}):
+                    server.create_episode_skeleton_plan(project, 2, target, pages=1)
+
+            plan = json.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(plan["pages"]), 1)
+        self.assertEqual(len(plan["pages"][0]["panels"]), 1)
+
     def test_read_env_returns_empty_config_when_file_is_missing(self):
         server = load_server_module()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -119,6 +392,88 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertIn("不生成图片", result["message"])
 
+    def test_direct_image_model_test_does_not_require_comfyui_checks(self):
+        server = load_server_module()
+        health = {
+            "ok": True,
+            "image_backend": "direct_api",
+            "generation_ready": True,
+            "checks": {},
+            "image_api_key_configured": True,
+        }
+        settings = {
+            "image_backend": "direct_api",
+            "models": {"image_model": "gpt-image-2"},
+            "endpoints": {"image_base_url": "https://image.example/v1"},
+        }
+        config = {"text_env_path": "/tmp/text.env", "image_env_path": "/tmp/image.env"}
+
+        with patch.object(server, "comfy_health", return_value=health):
+            with patch.object(server, "settings_summary", return_value=settings):
+                with patch.object(server, "config_snapshot", return_value=config):
+                    result = server.test_model_api({"target": "image"})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertNotIn("ComfyUI", result["message"])
+
+    def test_comfyui_local_model_test_does_not_require_cloud_model_config(self):
+        server = load_server_module()
+        health = {
+            "ok": True,
+            "image_backend": "comfyui",
+            "generation_ready": True,
+            "checks": {"object_info": {"ok": True}},
+            "image_api_key_configured": False,
+        }
+        settings = {
+            "image_backend": "comfyui",
+            "models": {"image_model": ""},
+            "endpoints": {"image_base_url": ""},
+        }
+        config = {"text_env_path": "/tmp/text.env", "image_env_path": "/tmp/image.env"}
+
+        with patch.object(server, "comfy_health", return_value=health):
+            with patch.object(server, "settings_summary", return_value=settings):
+                with patch.object(server, "config_snapshot", return_value=config):
+                    result = server.test_model_api({"target": "image", "live": True})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dry_run"])
+        self.assertIn("本地模型", result["message"])
+
+    def test_generation_backend_ready_accepts_comfyui_without_cloud_key(self):
+        server = load_server_module()
+
+        self.assertTrue(server.generation_backend_ready({
+            "ok": True,
+            "image_backend": "comfyui",
+            "generation_ready": True,
+            "image_api_key_configured": False,
+        }))
+        self.assertFalse(server.generation_backend_ready({
+            "ok": False,
+            "image_backend": "direct_api",
+            "generation_ready": False,
+            "image_api_key_configured": False,
+        }))
+
+    def test_dashboard_does_not_flag_missing_cloud_key_for_comfyui_local_models(self):
+        server = load_server_module()
+        health = {
+            "ok": True,
+            "image_backend": "comfyui",
+            "generation_ready": True,
+            "image_api_key_configured": False,
+        }
+
+        with patch.object(server.db, "dashboard_pending_outputs", return_value=[]):
+            with patch.object(server.db, "dashboard_active_approval", return_value=None):
+                with patch.object(server.db, "dashboard_pending_settings", return_value=[]):
+                    todos = server.dashboard_todos({"slug": "test", "title": "测试"}, health, [])
+
+        self.assertFalse(any(item.get("id") == "system-preflight" for item in todos))
+
     def test_image_model_live_test_calls_business_api(self):
         server = load_server_module()
         health = {
@@ -149,6 +504,37 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertTrue(result["detail"]["generates_image"])
         self.assertFalse(result["detail"]["saved"])
         call_image.assert_called_once_with("gpt-image-2", "https://image.example", "/tmp/image.env", timeout=180)
+
+    def test_image_model_business_call_sends_application_user_agent(self):
+        server = load_server_module()
+
+        class Response:
+            status = 200
+
+            def read(self):
+                return b'{"data":[{"url":"https://image.example/test.png"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_env = Path(temp_dir) / "image.env"
+            image_env.write_text("OPENAI_API_KEY=test-key\n", encoding="utf-8")
+            with patch.object(server.urllib.request, "urlopen", return_value=Response()) as urlopen:
+                result = server.call_image_model_test(
+                    "gpt-image-2",
+                    "https://image.example/v1/images/generations",
+                    str(image_env),
+                    timeout=30,
+                )
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://image.example/v1/images/generations")
+        self.assertEqual(request.get_header("User-agent"), "ComicPipeline/2.0")
+        self.assertTrue(result["generates_image"])
 
     def test_text_model_test_requires_text_key(self):
         server = load_server_module()
@@ -421,6 +807,40 @@ class RuntimeConfigTest(unittest.TestCase):
 
         self.assertEqual(recommendation["stage"], "close_reading")
         self.assertFalse(recommendation["requires_approval"])
+
+    def test_agent_final_episode_has_no_next_episode_action(self):
+        server = load_server_module()
+        detail = {
+            "pages": [{"page_id": "EP02_P001", "status": "complete", "panels": [{}]}],
+            "assets": {"total_assets": 1},
+            "media": {"summary": {
+                "pages_total": 1,
+                "pages_ready": 1,
+                "real_pages_ready": 1,
+                "panels_total": 1,
+                "panels_ready": 1,
+            }},
+        }
+        approvals = {key: True for key in server.default_approval_state() if key != "updated"}
+
+        with patch.object(server, "active_project", return_value={"slug": "test"}):
+            with patch.object(server, "global_asset_readiness", return_value={"ok": True}):
+                with patch.object(server, "chapter_asset_coverage", return_value={"ok": True, "message": ""}):
+                    with patch.object(server, "generated_output_quality_status", return_value={"quality_failed": 0, "quality_missing": 0}):
+                        with patch.object(server, "generated_output_review_blockers", return_value={"count": 0}):
+                            with patch.object(server, "next_episode_number", return_value=0):
+                                recommendation = server.agent_recommendation(
+                                    2,
+                                    {"ok": True, "image_api_key_configured": True},
+                                    detail,
+                                    {"texts": {"image_health_qa_md": "ready"}},
+                                    approvals,
+                                )
+
+        self.assertEqual(recommendation["state"], "complete")
+        self.assertEqual(recommendation["gate"], "")
+        self.assertFalse(recommendation["requires_approval"])
+        self.assertEqual(recommendation["action_label"], "")
 
     def test_episode_pages_preserve_close_reading_director_fields(self):
         server = load_server_module()

@@ -50,6 +50,16 @@ class PowerShellConfigTest(unittest.TestCase):
         self.assertIn("Get-ComicEnvValue", script)
         self.assertIn("$envValue", script)
         self.assertIn("COMIC_PIPELINE_IMAGE_QUALITY", script)
+        self.assertIn("COMIC_PIPELINE_IMAGE_BACKEND", script)
+
+    def test_configure_defaults_to_direct_api_and_local_output(self):
+        script = (ROOT / "configure.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('ValidateSet("direct_api", "comfyui")', script)
+        self.assertIn('$ImageBackend = "direct_api"', script)
+        self.assertIn("COMIC_PIPELINE_IMAGE_BACKEND=$ImageBackend", script)
+        self.assertIn('Join-Path $root "output"', script)
+        self.assertIn("COMIC_PIPELINE_OUTPUT_ROOT=$(Join-Path $imageOutputRoot 'ComicPipeline')", script)
 
     @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
     def test_wait_script_exits_on_comfy_error(self):

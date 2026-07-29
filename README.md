@@ -2,9 +2,16 @@
 
 独立漫画流水线包。目标是把小说拆解、人工审核、漫画生成、页面 QA、下一章循环从当前工作区中独立出来，后续可以复制到其他机器部署。
 
+图片生成长期支持两种后端，所有业务流程共用同一套 PostgreSQL 任务、审核、重试、版本备份、输出、拼版和 QA：
+
+- `direct_api`：默认模式，控制台直连 OpenAI-compatible 图片 API，不依赖 ComfyUI 或 `8188`。
+- `comfyui`：可选本地模型模式，用于本地 checkpoint、LoRA、ControlNet 和可视化工作流。它是正式支持的后端，不是待清理的迁移代码。
+
+当前自动生成的默认图片工作流仍使用 `OpenAICompatibleImageGenerate`。ComfyUI 后端可以执行已有的 API-format 本地工作流；自动创建 checkpoint、LoRA、ControlNet 节点图属于后续工作流模板功能，不在当前版本范围内。
+
 ## 目录
 
-- `custom_nodes/`: ComfyUI 漫画流水线节点和 Web 控制台资源。
+- `custom_nodes/`: 可选 ComfyUI 后端的漫画流水线节点和 Web 扩展资源。
 - `console/`: 独立本地控制台，配置、审核、阶段运行和结果查看都从这里进入。
 - `scripts/`: 章节拆解、页面计划、工作流生成、批量生成、页面组装和 QA 脚本。
 - `workflows/comic/`: 可提交的是基础 workflow 蓝图；按小说生成的分镜 workflow 属于运行产物。
@@ -59,10 +66,11 @@ Select-String -Path (Get-ChildItem -Recurse -File | Where-Object {
 
 ## 初始化配置
 
+默认使用直连图片 API：
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
-  -ComfyRoot "G:\ComfyUI" `
-  -ComfyUrl "http://127.0.0.1:8188" `
+  -ImageBackend direct_api `
   -NovelPath "E:\workspace\ComfyUIProjects\搜神记.txt" `
   -TextApiKey "sk-..." `
   -TextBaseUrl "https://api.example.com/v1" `
@@ -70,17 +78,29 @@ powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
   -ImageBaseUrl "https://api.example.com/v1"
 ```
 
-小说处理模型密钥会写到 `config/text.env`，图片生成模型密钥会写到 `config/image.env`。工作流只保存 `api_key_env_path`，不会把明文 key 写进 ComfyUI prompt。
+使用本地 ComfyUI 模型时：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
+  -ImageBackend comfyui `
+  -ComfyRoot "G:\ComfyUI" `
+  -ComfyUrl "http://127.0.0.1:8188" `
+  -NovelPath "E:\workspace\ComfyUIProjects\搜神记.txt"
+```
+
+小说处理模型密钥会写到 `config/text.env`，直连图片模型密钥会写到 `config/image.env`。配置和工作流不会保存明文 key。选择 `comfyui` 时，图片 API Key 和云端图片模型不是必填项；只有工作流本身调用云端图片节点时才需要配置。
 
 不想在命令行传 key 时，直接编辑：
 
-- `config/.env`: ComfyUI 路径、ComfyUI URL、小说文件、输出目录、默认页数、编码。
+- `config/.env`: 图片后端、可选 ComfyUI 路径和 URL、小说文件、输出目录、默认页数、编码。
 - `config/text.env`: `OPENAI_API_KEY`、`OPENAI_BASE_URL`。
 - `config/image.env`: `OPENAI_API_KEY`、`OPENAI_BASE_URL`。
 
-ComfyUI 里可以添加 `comic/pipeline -> 漫画流水线配置` 节点检查当前配置。这个节点只显示 API Key 是否已配置，不输出明文 key。
+选择 `comfyui` 时，可以在 ComfyUI 中添加 `comic/pipeline -> 漫画流水线配置` 节点检查当前配置。这个节点只显示 API Key 是否已配置，不输出明文 key。
 
-## 安装到 ComfyUI
+## 可选：安装到 ComfyUI
+
+只有选择 `comfyui` 本地模型后端时才需要执行本节。`direct_api` 模式不安装节点也能完成漫画生成。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install_to_comfyui.ps1 -Force -DisableLegacySingleFileNode
@@ -92,31 +112,41 @@ powershell -ExecutionPolicy Bypass -File .\install_to_comfyui.ps1 -Force -Disabl
 
 ## 启动控制台
 
-日常使用不需要进入 ComfyUI 节点图。ComfyUI 只作为后端执行器，配置、审核、运行和结果查看都从漫画流水线控制台操作。
+日常使用不需要进入 ComfyUI 节点图。配置、审核、运行和结果查看都从漫画流水线控制台操作；生成时由设置中选择的图片后端执行。
 
 后续控制台界面、漫画预览和页面拼版必须遵循 `docs/design-guidelines.md`。当前固化方向是视觉紧凑、黑色 gutter、横向大格边缘对齐、无粗边框、无大留白。
 
 ### Docker Compose 启动（推荐）
 
-Docker 模式会一起启动：
+默认 Docker 模式只启动：
 
 - 漫画控制台：`http://127.0.0.1:8199`
 - PostgreSQL：宿主机端口 `55432`
-- 宿主机 ComfyUI：默认从 `G:\ComfyUI` 自动启动并监听 `8188`
 
-ComfyUI 作为宿主机生成后端运行，默认地址是 `http://127.0.0.1:8188`。启动脚本会在后端未运行时自动拉起它，控制台容器通过 `host.docker.internal:8188` 访问。使用其他安装目录时传入 `-ComfyRoot`；只启动控制台和数据库时传入 `-SkipGenerationBackend`。
+默认 `direct_api` 模式不会探测或启动 `8188`，也不会挂载本机 ComfyUI 目录：
 
 ```powershell
 cd E:\workspace\ComfyUIProjects\comic-pipeline
 powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 -Build
-
-# 自定义 ComfyUI 目录
-powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 -ComfyRoot "D:\ComfyUI"
 ```
+
+使用 ComfyUI 本地模型时显式选择后端。启动脚本会在需要时拉起宿主机 ComfyUI，并通过 `docker-compose.comfyui.yml` 将本地模型与输出目录挂载到控制台容器：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 `
+  -ImageBackend comfyui `
+  -ComfyRoot "D:\ComfyUI" `
+  -ComfyUrl "http://127.0.0.1:8188" `
+  -Build
+```
+
+ComfyUI 已由其他方式管理时，可追加 `-SkipGenerationBackend`，只让控制台连接现有服务。
+
+Docker 已按默认模式启动后，仅在控制台设置中切换为 `comfyui` 不会动态增加宿主机目录挂载。需要重新运行上述 `start_docker.ps1 -ImageBackend comfyui` 命令；健康检查会在共享输出目录未挂载时阻止生成。
 
 首次启动时脚本只会在缺失时创建：
 
-- `config/.env.docker`：Docker 模式路径、数据库、ComfyUI 地址。
+- `config/.env.docker`：Docker 模式、图片后端、路径和数据库配置。
 - `config/text.env`：小说处理模型 API Key 和 Base URL。
 - `config/image.env`：图片生成 API Key 和 Base URL。
 
@@ -130,11 +160,11 @@ docker compose logs --tail=100 comic-console
 docker compose down
 ```
 
-如果迁移到其他机器，先修改 `docker-compose.yml` 中的本机 ComfyUI 挂载路径，例如 `G:/ComfyUI:/comfyui`，再修改 `config/.env.docker` 中的输出路径。真实 API Key 分别写在 `config/text.env` 和 `config/image.env`。
+迁移到其他机器时，默认模式不需要修改 Compose 的本机路径。使用 ComfyUI 时通过 `-ImageBackend comfyui -ComfyRoot <目录>` 启动，不要直接把机器路径写死在 `docker-compose.yml`。真实 API Key 分别写在 `config/text.env` 和 `config/image.env`。
 
 ### 本地 Python 启动
 
-启动控制台时会自动检查并拉起生成后端：
+启动控制台时会根据 `COMIC_PIPELINE_IMAGE_BACKEND` 处理生成后端。`direct_api` 不启动额外服务；`comfyui` 会检查并按配置尝试拉起本地服务：
 
 ```powershell
 cd E:\workspace\ComfyUIProjects\comic-pipeline
@@ -150,7 +180,7 @@ http://127.0.0.1:8199
 控制台提供：
 
 - 在左侧独立 `设置` 中分别配置小说处理模型、图片生成模型、两个 API Key、图片质量、生成后端、输出目录和 PostgreSQL。
-- 检查 ComfyUI、`object_info`、`extensions`、队列和关键路径。
+- 按当前后端检查直连图片 API，或检查 ComfyUI 的 `object_info`、`extensions`、队列和关键路径。
 - 按小说隔离原文、章节拆解、全局设定、全局素材、生成结果、审核记录和任务。
 - 按阶段运行：小说导入与章节骨架、项目级设定扫描、全局素材确认、章节细读、生成审核、页面 QA、下一章循环。
 - 批量选择设定生成视觉素材，查看串行进度，汇总失败项并仅重试失败素材。
@@ -163,7 +193,7 @@ http://127.0.0.1:8199
 powershell -ExecutionPolicy Bypass -File .\check_config.ps1
 ```
 
-真实生成前再执行：
+直连图片 API 模式下，真实生成前再执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\check_config.ps1 -RequireImageApiKey
@@ -190,7 +220,7 @@ http://127.0.0.1:8199
 
 流程顺序：
 
-1. 在 `设置` 中分别测试小说处理模型和图片生成模型，确认 PostgreSQL 与 ComfyUI 可用。
+1. 在 `设置` 中选择图片生成后端，分别测试小说处理模型和图片生成模型，确认 PostgreSQL 与所选后端可用。
 2. 在 `导入小说` 中选择小说文件。首次处理会拆分章节，并提取项目级角色、场景、道具和世界观候选。
 3. 在 `小说设定库` 中按分组审核、编辑或 AI 重提设定；核心设定需要审核并锁定。
 4. 在 `全局素材库` 中生成并审核核心角色、场景和道具参考图，可批量生成或仅重试失败项。
@@ -205,24 +235,35 @@ http://127.0.0.1:8199
 - 漫画页面：`COMIC_PIPELINE_OUTPUT_ROOT\pages`
 - 审核 Markdown：`COMIC_PIPELINE_OUTPUT_ROOT\review_packages`
 - 控制台结果页：`http://127.0.0.1:8199`
-- ComfyUI 预览：保留为兼容入口，不作为主要操作界面。
+- ComfyUI 预览：选择 `comfyui` 时保留为辅助入口，不作为主要操作界面。
 - 运行 JSON：`manifests\*.json`
 
 图片质量可在 `设置 -> 图片生成 -> 图片生成质量` 中选择 `自动 / 低 / 中 / 高`。日常使用推荐 `自动`；低质量适合节省额度的流程联调。
 
 ## 迁移到其他机器
 
-复制整个 `comic-pipeline` 目录到目标机器，然后：
+复制整个 `comic-pipeline` 目录到目标机器。默认直连模式：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
-  -ComfyRoot "D:\ComfyUI" `
-  -ComfyUrl "http://127.0.0.1:8188" `
+  -ImageBackend direct_api `
   -NovelPath "D:\Novels\novel.txt" `
   -Force
 
 notepad .\config\text.env
 notepad .\config\image.env
+powershell -ExecutionPolicy Bypass -File .\check_config.ps1
+```
+
+需要使用本地模型的机器再安装 ComfyUI 节点并切换后端：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
+  -ImageBackend comfyui `
+  -ComfyRoot "D:\ComfyUI" `
+  -ComfyUrl "http://127.0.0.1:8188" `
+  -NovelPath "D:\Novels\novel.txt" `
+  -Force
 
 powershell -ExecutionPolicy Bypass -File .\install_to_comfyui.ps1 -Force -DisableLegacySingleFileNode
 powershell -ExecutionPolicy Bypass -File .\check_config.ps1
@@ -232,11 +273,11 @@ powershell -ExecutionPolicy Bypass -File .\check_config.ps1
 
 ## 部署检查清单
 
-1. 安装依赖：Docker Desktop、Git、Python 3.12；真实生成还需要可访问的 ComfyUI。
+1. 安装依赖：Docker Desktop、Git、Python 3.12；只有本地模型模式需要额外安装 ComfyUI。
 2. 克隆或复制 `comic-pipeline/` 到目标机器。
 3. 复制样例配置或运行 `configure.ps1` / `start_docker.ps1` 生成本机配置。
 4. 在 `config/text.env` 配置小说处理模型，在 `config/image.env` 配置图片生成模型。
-5. Docker 模式下检查 `docker-compose.yml` 的 ComfyUI 挂载路径；本地模式下检查 `COMIC_PIPELINE_COMFY_ROOT`。
+5. 在设置中选择 `direct_api` 或 `comfyui`；后者需检查 `COMIC_PIPELINE_COMFY_ROOT`、URL、节点和本地模型。
 6. 启动 PostgreSQL 和控制台：推荐 `powershell -ExecutionPolicy Bypass -File .\start_docker.ps1 -Build`。
 7. 打开 `http://127.0.0.1:8199`，在 `设置` 中测试小说处理模型和图片模型连接。
 8. 导入小说后先跑章节拆解和全局素材审核，再进入章节细读和漫画生成。

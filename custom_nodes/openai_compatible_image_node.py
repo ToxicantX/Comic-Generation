@@ -2,6 +2,7 @@ import base64
 from io import BytesIO
 import os
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -85,12 +86,14 @@ class OpenAICompatibleImageGenerate:
                     "n": 1,
                     "response_format": "b64_json",
                 }
-                response = _post_json(session, endpoint, headers, payload)
-                attempts.append(("json_generation_fallback", response))
+                response = _post_json_with_rate_limit_retry(
+                    session, endpoint, headers, payload, attempts, "json_generation_fallback"
+                )
                 if _should_retry_without_response_format(response):
                     payload.pop("response_format", None)
-                    response = _post_json(session, endpoint, headers, payload)
-                    attempts.append(("json_generation_fallback_default", response))
+                    response = _post_json_with_rate_limit_retry(
+                        session, endpoint, headers, payload, attempts, "json_generation_fallback_default"
+                    )
         else:
             endpoint = base_url.rstrip("/") + "/v1/images/generations"
             payload = {
@@ -101,13 +104,15 @@ class OpenAICompatibleImageGenerate:
                 "n": 1,
                 "response_format": "b64_json",
             }
-            response = _post_json(session, endpoint, headers, payload)
-            attempts.append(("json_b64_json", response))
+            response = _post_json_with_rate_limit_retry(
+                session, endpoint, headers, payload, attempts, "json_b64_json"
+            )
             if _should_retry_without_response_format(response):
                 fallback_payload = dict(payload)
                 fallback_payload.pop("response_format", None)
-                response = _post_json(session, endpoint, headers, fallback_payload)
-                attempts.append(("json_default_response", response))
+                response = _post_json_with_rate_limit_retry(
+                    session, endpoint, headers, fallback_payload, attempts, "json_default_response"
+                )
             if _should_retry_as_form(response) or _attempts_include_content_type_issue(attempts):
                 form_payload = {
                     "model": model.strip(),
@@ -270,6 +275,29 @@ def _post_json(session: requests.Session, endpoint: str, headers: dict, payload:
     return session.post(endpoint, json=payload, headers=request_headers, timeout=600)
 
 
+def _post_json_with_rate_limit_retry(
+    session: requests.Session,
+    endpoint: str,
+    headers: dict,
+    payload: dict,
+    attempts: list[tuple[str, requests.Response]],
+    attempt_name: str,
+) -> requests.Response:
+    response = _post_json(session, endpoint, headers, payload)
+    attempts.append((attempt_name, response))
+    if response.status_code != 429:
+        return response
+    retry_after = str(getattr(response, "headers", {}).get("Retry-After") or "").strip()
+    try:
+        delay = max(1, min(300, int(float(retry_after)) + 1))
+    except (TypeError, ValueError):
+        delay = 65
+    time.sleep(delay)
+    response = _post_json(session, endpoint, headers, payload)
+    attempts.append((f"{attempt_name}_rate_limit_retry", response))
+    return response
+
+
 def _should_retry_without_response_format(response: requests.Response) -> bool:
     if response.status_code not in {400, 415, 422}:
         return False
@@ -283,7 +311,12 @@ def _should_retry_without_response_format(response: requests.Response) -> bool:
 
 
 def _should_fallback_from_edits(response: requests.Response) -> bool:
-    return response.status_code >= 400
+    if response.status_code in {404, 405}:
+        return True
+    if response.status_code not in {400, 415, 422}:
+        return False
+    text = _safe_error_text(response).lower()
+    return "edit" in text and any(token in text for token in ("unsupported", "not supported", "unknown endpoint"))
 
 
 def _should_retry_as_form(response: requests.Response) -> bool:

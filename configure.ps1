@@ -1,4 +1,6 @@
 param(
+    [ValidateSet("direct_api", "comfyui")]
+    [string]$ImageBackend = "direct_api",
     [string]$ComfyRoot = "G:\ComfyUI",
     [string]$ComfyUrl = "http://127.0.0.1:8188",
     [string]$NovelPath = "",
@@ -35,13 +37,19 @@ if (-not $NovelPath) {
         $NovelPath = $defaultNovel
     }
 }
+$imageOutputRoot = if ($ImageBackend -eq "comfyui") {
+    Join-Path $ComfyRoot "output"
+} else {
+    Join-Path $root "output"
+}
 
 @(
     "COMIC_PIPELINE_WORKSPACE=$root",
+    "COMIC_PIPELINE_IMAGE_BACKEND=$ImageBackend",
     "COMIC_PIPELINE_COMFY_ROOT=$ComfyRoot",
     "COMIC_PIPELINE_COMFY_URL=$ComfyUrl",
-    "COMIC_PIPELINE_OUTPUT_ROOT=$(Join-Path $ComfyRoot 'output\ComicPipeline')",
-    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT=$(Join-Path $ComfyRoot 'output')",
+    "COMIC_PIPELINE_OUTPUT_ROOT=$(Join-Path $imageOutputRoot 'ComicPipeline')",
+    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT=$imageOutputRoot",
     "COMIC_PIPELINE_NOVEL_PATH=$NovelPath",
     "COMIC_PIPELINE_TEXT_ENV_PATH=$textEnvPath",
     "COMIC_PIPELINE_IMAGE_ENV_PATH=$imageEnvPath",

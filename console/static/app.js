@@ -795,6 +795,7 @@ async function loadConfig() {
   state.config = await api("/api/config");
   await loadSettingsSummary();
   const c = state.config.config;
+  setValue("imageBackend", c.COMIC_PIPELINE_IMAGE_BACKEND || "direct_api");
   setValue("comfyUrl", c.COMIC_PIPELINE_COMFY_URL);
   setValue("comfyRoot", c.COMIC_PIPELINE_COMFY_ROOT);
   setValue("novelPath", c.COMIC_PIPELINE_NOVEL_PATH);
@@ -813,6 +814,7 @@ async function loadConfig() {
   setValue("imageBaseUrl", state.config.image?.OPENAI_BASE_URL || "");
   state.activeProject = state.config.projects?.active || c.COMIC_PIPELINE_ACTIVE_PROJECT || "";
   $("keyMetric").textContent = state.config.image?.OPENAI_API_KEY_CONFIGURED ? "已配置" : "未配置";
+  updateImageBackendControls();
   updateSettingsBadges();
 }
 
@@ -850,6 +852,7 @@ async function saveConfig() {
 function settingsPayloadFromForm() {
   return {
     config: {
+      COMIC_PIPELINE_IMAGE_BACKEND: $("imageBackend").value,
       COMIC_PIPELINE_COMFY_URL: $("comfyUrl").value,
       COMIC_PIPELINE_COMFY_ROOT: $("comfyRoot").value,
       COMIC_PIPELINE_NOVEL_PATH: $("novelPath").value,
@@ -878,7 +881,8 @@ function settingsPayloadFromForm() {
 }
 
 async function testModel(target) {
-  if (target === "image") {
+  const liveImageTest = target === "image" && currentImageBackend() === "direct_api";
+  if (liveImageTest) {
     const ok = await confirmDialog("将调用图片模型生成一张低质量测试图，会消耗少量图片额度。测试图只用于验证响应，不会保存到素材库。", {
       title: "测试图片生成业务",
       kind: "实际调用",
@@ -890,7 +894,9 @@ async function testModel(target) {
   setButtons(true);
   if (resultBox) {
     resultBox.className = "model-test-result running";
-    resultBox.textContent = target === "text" ? "正在测试小说处理模型..." : "正在调用图片生成模型...";
+    resultBox.textContent = target === "text"
+      ? "正在测试小说处理模型..."
+      : (liveImageTest ? "正在调用图片生成模型..." : "正在检查 ComfyUI 本地模型环境...");
   }
   try {
     state.config = await api("/api/config", { method: "POST", body: JSON.stringify(settingsPayloadFromForm()) });
@@ -903,7 +909,7 @@ async function testModel(target) {
       body: JSON.stringify({
         target,
         timeout: target === "text" ? Math.min(Math.max(getInt("textModelTimeout", 300), 30), 120) : 180,
-        live: target === "image",
+        live: liveImageTest,
       }),
     });
     renderModelTestResult(target, result);
@@ -964,8 +970,14 @@ async function loadHealth() {
   const badge = $("healthBadge");
   badge.className = "badge " + (state.health.ok ? "ok" : "bad");
   badge.textContent = state.health.ok ? "后端正常" : "后端异常";
-  $("comfyMetric").textContent = state.health.checks.root?.ok ? "可访问" : "不可访问";
-  $("keyMetric").textContent = state.health.image_api_key_configured ? "图片已配置" : "图片未配置";
+  const imageBackend = state.health.image_backend || currentImageBackend();
+  const generationReady = imageBackendReady();
+  $("comfyMetric").textContent = generationReady
+    ? (imageBackend === "comfyui" ? "ComfyUI 可用" : "直连 API 可用")
+    : (imageBackend === "comfyui" ? "ComfyUI 未就绪" : "直连 API 未就绪");
+  $("keyMetric").textContent = state.health.image_api_key_configured
+    ? "图片已配置"
+    : (imageBackend === "comfyui" ? "本地模型可选" : "图片未配置");
   updateSettingsBadges();
   $("statusLine").textContent = state.health.ok
     ? "后端正常，配置、审核、生成和查看都在控制台完成。"
@@ -987,6 +999,7 @@ async function checkGenerationBackend() {
 }
 
 async function startGenerationBackend() {
+  if (currentImageBackend() !== "comfyui") return;
   const ok = window.confirm("尝试启动生成后端？这会使用设置中的 ComfyUI 根目录和端口。");
   if (!ok) return;
   setButtons(true);
@@ -1175,7 +1188,11 @@ function renderAgent() {
   $("agentDetail").textContent = displayUiText(rec.detail || "暂无建议");
   if ($("agentCompactTitle")) $("agentCompactTitle").textContent = displayUiText(rec.title || "等待检查");
   if ($("agentCompactDetail")) $("agentCompactDetail").textContent = displayUiText(rec.detail || "暂无建议");
-  $("agentPreviewLink").href = state.agent.links?.preview || "#";
+  const previewLink = $("agentPreviewLink");
+  const externalPreview = state.agent.links?.preview || "";
+  previewLink.href = externalPreview || "#";
+  previewLink.target = externalPreview ? "_blank" : "";
+  previewLink.textContent = externalPreview ? "打开 ComfyUI 预览" : "查看生成结果";
 
   const metrics = state.agent.metrics || {};
   const completePages = Number(metrics.real_pages_ready ?? metrics.pages_ready ?? 0);
@@ -1262,14 +1279,15 @@ function renderAgentPrimary() {
   const button = $("agentPrimaryButton");
   const compactButton = $("agentCompactButton");
   const rec = state.agent?.recommendation || {};
-  button.textContent = rec.action_label || "执行建议";
-  button.disabled = false;
+  const workflowComplete = rec.state === "complete" && !Number(rec.next_episode || 0);
+  button.textContent = workflowComplete ? "流程已完成" : (rec.action_label || "执行建议");
+  button.disabled = workflowComplete;
   button.dataset.agentStage = rec.stage || "";
   button.dataset.agentGate = rec.gate || "";
   button.dataset.nextEpisode = rec.next_episode || "";
   if (compactButton) {
-    compactButton.textContent = rec.action_label || "执行建议";
-    compactButton.disabled = false;
+    compactButton.textContent = workflowComplete ? "流程已完成" : (rec.action_label || "执行建议");
+    compactButton.disabled = workflowComplete;
     compactButton.dataset.agentStage = rec.stage || "";
     compactButton.dataset.agentGate = rec.gate || "";
     compactButton.dataset.nextEpisode = rec.next_episode || "";
@@ -1358,17 +1376,24 @@ function renderHomeSystem() {
   if (!box) return;
   const system = state.dashboard?.system_status || {};
   const dbReady = Boolean(system.database?.schema_ready || state.health?.database?.schema_ready);
-  const comfyReady = Boolean(system.comfyui?.ok || state.health?.ok);
+  const backendType = system.image_backend?.type || currentImageBackend();
+  const backendReady = Boolean(system.image_backend?.ok ?? state.health?.generation_ready ?? state.health?.ok);
   const textKeyReady = Boolean(state.settingsSummary?.api_keys?.text?.configured || state.config?.text?.OPENAI_API_KEY_CONFIGURED || state.health?.text_api_key_configured);
   const imageKeyReady = Boolean(system.api_key?.configured || state.settingsSummary?.api_keys?.image?.configured || state.health?.image_api_key_configured);
-  const keyReady = textKeyReady && imageKeyReady;
-  $("homeSystemBadge").textContent = dbReady && comfyReady && keyReady ? "全部正常" : "需处理";
-  $("homeSystemBadge").className = `mini-badge ${dbReady && comfyReady && keyReady ? "agent-state-complete" : "agent-state-blocked"}`;
+  const imageKeyRequired = system.api_key?.required ?? backendType !== "comfyui";
+  const imageCredentialReady = imageKeyReady || !imageKeyRequired;
+  const allReady = dbReady && backendReady && textKeyReady && imageCredentialReady;
+  $("homeSystemBadge").textContent = allReady ? "全部正常" : "需处理";
+  $("homeSystemBadge").className = `mini-badge ${allReady ? "agent-state-complete" : "agent-state-blocked"}`;
   box.innerHTML = [
     ["PostgreSQL", dbReady, dbReady ? "数据库已连接，schema 已就绪。" : (system.database?.error || "数据库未就绪。")],
-    ["生成后端", comfyReady, comfyReady ? "生成后端可访问。" : "生成后端不可访问，漫画生成会被阻断。"],
+    ["生成后端", backendReady, backendReady
+      ? (backendType === "comfyui" ? "ComfyUI 本地模型环境可用。" : "直连图片 API 已就绪。")
+      : "当前图片生成后端未就绪，漫画生成会被阻断。"],
     ["小说处理密钥", textKeyReady, textKeyReady ? "小说处理 API Key 已配置。" : "小说处理 API Key 未配置。"],
-    ["图片生成密钥", imageKeyReady, imageKeyReady ? "图片生成 API Key 已配置。" : "图片生成 API Key 未配置。"],
+    ["图片生成密钥", imageCredentialReady, imageKeyReady
+      ? "图片生成 API Key 已配置。"
+      : (imageKeyRequired ? "图片生成 API Key 未配置。" : "本地模型模式无需图片 API Key。")],
   ].map(([label, ok, detail]) => `
     <div class="home-status ${ok ? "ok" : "bad"}">
       <span>${ok ? "正常" : "异常"}</span>
@@ -5172,11 +5197,12 @@ function settingsSourceRows() {
   const imagePath = state.config?.image_env_path || "config/image.env";
   const database = state.config?.database || state.health?.database || {};
   const activeProject = state.projects?.find?.((item) => item.slug === state.activeProject) || {};
+  const localImageBackend = currentImageBackend() === "comfyui";
   return [
     {
       title: "控制台运行配置",
       path: configPath,
-      detail: "ComfyUI 地址、目录、小说路径、数据库地址、默认页数、当前小说项目。",
+      detail: "图片后端类型、ComfyUI 可选参数、小说路径、数据库地址、默认页数和当前小说项目。",
       state: state.config ? "已读取" : "未读取",
       ok: Boolean(state.config),
     },
@@ -5190,9 +5216,9 @@ function settingsSourceRows() {
     {
       title: "图片生成密钥",
       path: imagePath,
-      detail: "图片生成 API Key 和图片模型接口地址。用于 ComfyUI 图片生成节点。",
-      state: state.config?.image?.OPENAI_API_KEY_CONFIGURED ? "已配置" : "未配置",
-      ok: Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED),
+      detail: "图片生成 API Key 和图片模型接口地址。直连 API 与 ComfyUI 云端图片节点使用。",
+      state: state.config?.image?.OPENAI_API_KEY_CONFIGURED ? "已配置" : (localImageBackend ? "本地可选" : "未配置"),
+      ok: Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || localImageBackend),
     },
     {
       title: "PostgreSQL 数据",
@@ -5232,7 +5258,9 @@ function renderSettingsSources() {
 function settingsCheckAction(name) {
   return {
     postgres: "检查 PostgreSQL 服务、账号密码和端口。",
-    comfyui: "确认 8188 服务已启动，或使用“启动后端”。",
+    image_backend: currentImageBackend() === "comfyui"
+      ? "确认 ComfyUI 已启动，或使用“启动 ComfyUI”。"
+      : "配置图片 API Key 后测试图片生成模型。",
     text_api_key: "在小说处理配置中填写有效 API Key 后保存。",
     image_api_key: "在图片生成配置中填写有效 API Key 后保存。",
     output_root: "确认输出目录存在，并且当前用户有写入权限。",
@@ -5254,7 +5282,7 @@ function renderSettingsHealth() {
       badge.textContent = "未测试";
       badge.className = "mini-badge";
     }
-    box.innerHTML = `<div class="settings-empty">点击“连接测试”检查 PostgreSQL、ComfyUI、API Key、输出目录、模型配置和示例配置一致性。</div>`;
+    box.innerHTML = `<div class="settings-empty">点击“连接测试”检查 PostgreSQL、当前图片后端、API Key、输出目录、模型配置和示例配置一致性。</div>`;
     return;
   }
   const checks = Array.isArray(data.checks) ? data.checks : [];
@@ -5285,9 +5313,15 @@ function updateSettingsBadges() {
   renderEffectiveProjectConfig();
   const backendBadge = $("settingsBackendBadge");
   if (backendBadge) {
-    const ready = Boolean(state.health?.checks?.root?.ok);
-    backendBadge.textContent = ready ? "可访问" : "不可访问";
-    backendBadge.className = `mini-badge ${ready ? "agent-state-complete" : "agent-state-blocked"}`;
+    const backend = currentImageBackend();
+    const pendingSave = imageBackendSelectionChanged();
+    const ready = !pendingSave && imageBackendReady();
+    backendBadge.textContent = pendingSave
+      ? "保存后检查"
+      : ready
+        ? (backend === "comfyui" ? "ComfyUI 可用" : "直连 API 可用")
+        : (backend === "comfyui" ? "ComfyUI 未就绪" : "直连 API 未就绪");
+    backendBadge.className = `mini-badge ${pendingSave ? "agent-state-review" : ready ? "agent-state-complete" : "agent-state-blocked"}`;
   }
   const textKeyBadge = $("settingsTextKeyBadge");
   if (textKeyBadge) {
@@ -5298,8 +5332,9 @@ function updateSettingsBadges() {
   const imageKeyBadge = $("settingsImageKeyBadge");
   if (imageKeyBadge) {
     const configured = Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
-    imageKeyBadge.textContent = configured ? "已配置" : "未配置";
-    imageKeyBadge.className = `mini-badge ${configured ? "agent-state-complete" : "agent-state-blocked"}`;
+    const optional = currentImageBackend() === "comfyui";
+    imageKeyBadge.textContent = configured ? "已配置" : (optional ? "本地可选" : "未配置");
+    imageKeyBadge.className = `mini-badge ${configured || optional ? "agent-state-complete" : "agent-state-blocked"}`;
   }
   const dbBadge = $("settingsDatabaseBadge");
   if (dbBadge) {
@@ -5326,9 +5361,69 @@ function updateSettingsBadges() {
     const configured = Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
     imageApiKeyDetail.textContent = configured
       ? "图片生成密钥已配置。留空保存不会覆盖现有密钥。"
+      : currentImageBackend() === "comfyui"
+        ? "本地模型工作流无需图片 API Key；仅在工作流使用云端图片节点时配置。"
       : "图片生成密钥未配置。填写后保存到 image.env，页面不会回显明文。";
   }
+  updateImageBackendControls();
   renderGenerationBackendDiagnostics();
+}
+
+function currentImageBackend() {
+  return $("imageBackend")?.value
+    || state.settingsSummary?.image_backend
+    || state.health?.image_backend
+    || state.config?.config?.COMIC_PIPELINE_IMAGE_BACKEND
+    || "direct_api";
+}
+
+function savedImageBackend() {
+  return state.settingsSummary?.image_backend
+    || state.health?.image_backend
+    || state.config?.config?.COMIC_PIPELINE_IMAGE_BACKEND
+    || "direct_api";
+}
+
+function imageBackendSelectionChanged() {
+  const control = $("imageBackend");
+  return Boolean(control?.value && control.value !== savedImageBackend());
+}
+
+function imageBackendReady() {
+  if (imageBackendSelectionChanged()) return false;
+  if (typeof state.health?.generation_ready === "boolean") return state.health.generation_ready;
+  return currentImageBackend() === "comfyui"
+    ? Boolean(state.health?.checks?.root?.ok)
+    : Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
+}
+
+function updateImageBackendControls() {
+  const isComfy = currentImageBackend() === "comfyui";
+  const pendingSave = imageBackendSelectionChanged();
+  const fields = $("comfySettingsFields");
+  const startButton = $("startBackendButton");
+  const checkButton = $("checkBackendButton");
+  const testImageButton = $("testImageModelButton");
+  const note = $("backendModeNote");
+  if (fields) fields.disabled = !isComfy;
+  if (startButton) {
+    startButton.textContent = isComfy ? "启动 ComfyUI" : "无需启动";
+    startButton.disabled = !isComfy || pendingSave;
+    startButton.title = isComfy ? "启动设置中的 ComfyUI" : "直连 API 不需要启动独立服务";
+  }
+  if (checkButton) {
+    checkButton.textContent = isComfy ? "检查 ComfyUI" : "检查直连 API";
+    checkButton.disabled = pendingSave;
+  }
+  if (testImageButton) {
+    testImageButton.textContent = isComfy ? "检查本地模型环境" : "测试图片生成模型";
+    testImageButton.disabled = pendingSave;
+  }
+  if (note) {
+    note.textContent = isComfy
+      ? "使用本地模型、LoRA、ControlNet 或可视化工作流时选择此模式。"
+      : "默认直连图片 API，不访问 8188，也无需启动独立生成服务。";
+  }
 }
 
 function sourceLabel(value) {
@@ -5345,6 +5440,7 @@ function renderEffectiveProjectConfig() {
   const modelSources = models.sources || {};
   const pathSources = paths.sources || {};
   const rows = [
+    ["图片生成后端", summary.image_backend === "comfyui" ? "ComfyUI（本地模型）" : "直连图片 API", "全局配置"],
     ["小说处理模型", models.novel_model || "-", sourceLabel(modelSources.novel_model)],
     ["图片生成模型", models.image_model || "-", sourceLabel(modelSources.image_model)],
     ["输出目录", paths.output_root || "-", sourceLabel(pathSources.output_root)],
@@ -5367,11 +5463,31 @@ function renderEffectiveProjectConfig() {
 function renderGenerationBackendDiagnostics(data = state.generationBackend) {
   const box = $("backendDiagnostics");
   if (!box) return;
+  if (imageBackendSelectionChanged()) {
+    box.textContent = "后端类型已修改，请先保存设置，再检查当前图片后端。";
+    return;
+  }
   const source = data?.diagnostics || data;
   if (!source) {
+    if (currentImageBackend() === "direct_api") {
+      box.textContent = "直连图片 API 模式无需启动服务。点击“检查直连 API”查看接口和密钥状态。";
+      return;
+    }
     const rootOk = Boolean(state.health?.paths?.comfy_root?.exists);
     const rootState = rootOk ? "ComfyUI 根目录存在" : "ComfyUI 根目录未确认";
     box.textContent = `${rootState}。点击“检查后端”获取端口、启动入口、模型目录和日志状态。`;
+    return;
+  }
+  if (source.image_backend === "direct_api") {
+    const provider = source.provider || {};
+    box.innerHTML = `
+      <dl>
+        <div><dt>状态</dt><dd>${source.ok ? "直连图片 API 已就绪" : "直连图片 API 未就绪"}</dd></div>
+        <div><dt>接口</dt><dd>${escapeHtml(provider.base_url || "使用默认 OpenAI 地址")}</dd></div>
+        <div><dt>密钥</dt><dd>${provider.api_key_configured ? "已配置" : "未配置"}</dd></div>
+        <div><dt>启动</dt><dd>无需独立服务，不访问 8188</dd></div>
+      </dl>
+    `;
     return;
   }
   const paths = source.paths || {};
@@ -5445,7 +5561,10 @@ function setButtons(disabled) {
   document.querySelectorAll(selectors.join(",")).forEach((button) => {
     button.disabled = disabled;
   });
-  if (!disabled) updateStageActions();
+  if (!disabled) {
+    updateStageActions();
+    updateImageBackendControls();
+  }
 }
 
 function updateStageActions() {
@@ -5644,12 +5763,22 @@ document.addEventListener("DOMContentLoaded", () => {
   $("agentRefreshButton").addEventListener("click", loadAgent);
   $("agentPrimaryButton").addEventListener("click", runAgentPrimary);
   $("agentCompactButton").addEventListener("click", runAgentPrimary);
+  $("agentPreviewLink").addEventListener("click", (event) => {
+    if (state.agent?.links?.preview) return;
+    event.preventDefault();
+    activateModule("media");
+  });
   $("saveConfigButton").addEventListener("click", saveConfig);
   $("checkSettingsButton").addEventListener("click", checkSettingsHealth);
   $("testTextModelButton").addEventListener("click", () => testModel("text"));
   $("testImageModelButton").addEventListener("click", () => testModel("image"));
   $("checkBackendButton").addEventListener("click", checkGenerationBackend);
   $("startBackendButton").addEventListener("click", startGenerationBackend);
+  $("imageBackend").addEventListener("change", () => {
+    state.generationBackend = null;
+    updateImageBackendControls();
+    updateSettingsBadges();
+  });
   $("projectSelect").addEventListener("change", () => switchProject($("projectSelect").value));
   $("processNovelButton").addEventListener("click", processNovel);
   $("previewNovelButton").addEventListener("click", previewNovelImport);

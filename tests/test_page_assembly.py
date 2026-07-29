@@ -17,6 +17,12 @@ def load_module():
 
 
 class PageAssemblyTest(unittest.TestCase):
+    def test_caption_cleanup_preserves_noun_ending_in_dao(self):
+        module = load_module()
+        caption = "晨光越过海面时，他知道自己此后要守住这条雾中航道。"
+
+        self.assertEqual(module.cleanup_caption_text(caption), caption.rstrip("。"))
+
     def test_default_font_can_be_measured_without_reopening_memory_resource(self):
         module = load_module()
         font = ImageFont.load_default()

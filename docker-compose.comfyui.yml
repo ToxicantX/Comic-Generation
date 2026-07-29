@@ -1,0 +1,7 @@
+services:
+  comic-console:
+    environment:
+      COMIC_PIPELINE_COMFY_OUTPUT_ROOT: /comfyui/output
+      COMIC_PIPELINE_OUTPUT_ROOT: /comfyui/output/ComicPipeline
+    volumes:
+      - "${COMIC_PIPELINE_HOST_COMFY_ROOT:-G:/ComfyUI}:/comfyui"

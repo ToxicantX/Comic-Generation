@@ -13,16 +13,24 @@ from urllib.request import urlopen
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from image_provider import generate_from_workflow, normalize_backend
+
 WORKSPACE = Path(os.getenv("COMIC_PIPELINE_WORKSPACE") or PACKAGE_ROOT)
-COMFY_OUTPUT_ROOT = Path(os.getenv("COMIC_PIPELINE_COMFY_OUTPUT_ROOT") or r"G:\ComfyUI\output")
+COMFY_OUTPUT_ROOT = Path(os.getenv("COMIC_PIPELINE_COMFY_OUTPUT_ROOT") or (WORKSPACE / "output"))
 OUTPUT_ROOT = Path(os.getenv("COMIC_PIPELINE_OUTPUT_ROOT") or (COMFY_OUTPUT_ROOT / "ComicPipeline"))
 MANIFESTS = Path(os.getenv("COMIC_PIPELINE_MANIFEST_DIR") or (WORKSPACE / "manifests"))
 SCRIPTS = WORKSPACE / "scripts"
 WORKFLOWS = WORKSPACE / "workflows" / "comic"
 DEFAULT_COMFY_URL = os.getenv("COMIC_PIPELINE_COMFY_URL", "http://127.0.0.1:8188")
+DEFAULT_IMAGE_BACKEND = normalize_backend()
 DEFAULT_NOVEL = os.getenv("COMIC_PIPELINE_NOVEL_PATH") or str(WORKSPACE / "novel.txt")
 DEFAULT_PAGES = int(os.getenv("COMIC_PIPELINE_DEFAULT_PAGES", "8") or "8")
 DEFAULT_ENCODING = os.getenv("COMIC_PIPELINE_ENCODING", "gb18030")
+
+os.environ.setdefault("COMIC_PIPELINE_WORKSPACE", str(WORKSPACE))
+os.environ.setdefault("COMIC_PIPELINE_COMFY_OUTPUT_ROOT", str(COMFY_OUTPUT_ROOT))
+os.environ.setdefault("COMIC_PIPELINE_OUTPUT_ROOT", str(OUTPUT_ROOT))
 
 STAGES = [
     "preflight",
@@ -59,6 +67,7 @@ def main() -> int:
         "partial": False,
         "dry_run": bool(args.dry_run),
         "generate_images": bool(args.generate_images and not args.skip_image_generation),
+        "image_backend": args.image_backend,
         "workspace": str(WORKSPACE),
         "comfy_url": args.comfy_url,
         "episode_number": context.get("episode_number"),
@@ -128,11 +137,12 @@ def main() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run or validate the longform comic ComfyUI episode pipeline.")
+    parser = argparse.ArgumentParser(description="Run or validate the longform comic episode pipeline.")
     parser.add_argument("--episode-number", type=int, default=0)
     parser.add_argument("--episode-plan", default="")
     parser.add_argument("--novel", default=DEFAULT_NOVEL)
     parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
+    parser.add_argument("--image-backend", choices=["direct_api", "comfyui"], default=DEFAULT_IMAGE_BACKEND)
     parser.add_argument("--pages", type=int, default=DEFAULT_PAGES)
     parser.add_argument("--excerpt-chars", type=int, default=3600)
     parser.add_argument("--encoding", default=DEFAULT_ENCODING)
@@ -342,11 +352,44 @@ def stage_anchor_assets(args: argparse.Namespace, context: dict, _: dict) -> dic
         return finish(stage, "skipped_existing", "All referenced anchor files already exist.")
     without_candidates = [item for item in missing_files if item["alias"] not in candidates]
     if without_candidates:
-        return finish(stage, "blocked", "Some missing anchors do not have matching ComfyUI workflows.", blocks_image_generation=True)
+        return finish(stage, "blocked", "Some missing anchors do not have matching image workflows.", blocks_image_generation=True)
     if args.skip_image_generation or not args.generate_images:
         return finish(stage, "skipped_disabled", "Anchor generation was not requested.", blocks_image_generation=True)
     if args.dry_run:
         return finish(stage, "would_run", "Dry run: missing anchor workflows would be submitted before panels.", blocks_image_generation=True)
+
+    if args.image_backend == "direct_api":
+        runs = []
+        for item in missing_files:
+            alias = item["alias"]
+            workflow = Path(candidates[alias]["workflow"])
+            output = Path(item["path"])
+            run = {
+                "alias": alias,
+                "workflow": str(workflow),
+                "expected_path": str(output),
+                "backend": "direct_api",
+                "completed": False,
+                "error": "",
+            }
+            try:
+                generated = generate_from_workflow(
+                    workflow,
+                    output,
+                    env_path=os.getenv("COMIC_PIPELINE_IMAGE_ENV_PATH") or None,
+                )
+                run["result"] = generated
+                run["completed"] = bool(generated.get("completed") and output.is_file())
+                if not run["completed"]:
+                    run["error"] = "Direct image provider did not create the expected anchor file."
+            except Exception as exc:
+                run["error"] = str(exc)
+            runs.append(run)
+            if not run["completed"]:
+                stage["runs"] = runs
+                return finish(stage, "failed", run["error"] or "Anchor generation failed.")
+        stage["runs"] = runs
+        return finish(stage, "passed", "Missing anchor workflows completed with the direct image API.")
 
     existing_jobs = find_existing_anchor_jobs(args.comfy_url, missing_files)
     if existing_jobs:
@@ -656,6 +699,13 @@ def stage_draft_qa(args: argparse.Namespace, context: dict, _: dict) -> dict:
 
 def stage_comfy_health(args: argparse.Namespace, context: dict, _: dict) -> dict:
     stage = base_stage("comfy_health")
+    if args.image_backend != "comfyui":
+        return finish(
+            stage,
+            "skipped_not_required",
+            "ComfyUI health check is not required for the direct API backend.",
+            backend=args.image_backend,
+        )
     should_run = args.check_comfy_health or (args.generate_images and not args.skip_image_generation)
     if not should_run:
         return finish(stage, "skipped_disabled", "ComfyUI health check is only required before image generation.")
@@ -680,6 +730,106 @@ def stage_comfy_health(args: argparse.Namespace, context: dict, _: dict) -> dict
     return finish(stage, "passed" if health.get("reachable") else "failed", "ComfyUI is reachable." if health.get("reachable") else "ComfyUI is not reachable.")
 
 
+def generate_panels_direct(args: argparse.Namespace, context: dict) -> dict:
+    result_path = context["paths"]["recovery_result"]
+    result = {
+        "updated": datetime.now().isoformat(timespec="seconds"),
+        "backend": "direct_api",
+        "completed": False,
+        "partial": False,
+        "waiting": False,
+        "jobs_discovered": 0,
+        "jobs_selected": 0,
+        "jobs_deferred": 0,
+        "jobs_attempted": [],
+        "pages_assembled": [],
+        "error": "",
+    }
+    try:
+        create_result_path = context["paths"]["workflow_create_result"]
+        if not create_result_path.is_file():
+            raise ValueError(f"Workflow create result is missing: {create_result_path}")
+        create_result = read_json(create_result_path)
+        jobs = []
+        for run in create_result.get("runs", []):
+            workflow_result_path = Path(str(run.get("workflow_result_path") or ""))
+            if not workflow_result_path.is_file():
+                continue
+            workflow_result = read_json(workflow_result_path)
+            page_id = str(run.get("page_id") or workflow_result.get("page_id") or "")
+            for entry in workflow_result.get("created", []):
+                workflow_path = Path(str(entry.get("workflow") or ""))
+                output_path = Path(str(entry.get("expected_panel_path") or ""))
+                if not workflow_path.is_file() or not str(entry.get("expected_panel_path") or ""):
+                    continue
+                if output_path.is_file():
+                    continue
+                jobs.append({
+                    "page_id": page_id,
+                    "panel_id": str(entry.get("panel_id") or ""),
+                    "workflow_path": workflow_path,
+                    "output_path": output_path,
+                    "workflow_result_path": workflow_result_path,
+                })
+        result["jobs_discovered"] = len(jobs)
+        if args.max_panels > 0:
+            jobs = jobs[:args.max_panels]
+        result["jobs_selected"] = len(jobs)
+        result["jobs_deferred"] = max(0, result["jobs_discovered"] - len(jobs))
+
+        prompt_suffix = ""
+        generation_context_path = context.get("generation_context_path")
+        if generation_context_path and Path(generation_context_path).is_file():
+            generation_context = read_json(Path(generation_context_path))
+            prompt_suffix = str(generation_context.get("prompt_block") or "")
+
+        for job in jobs:
+            attempt = {
+                "page_id": job["page_id"],
+                "panel_id": job["panel_id"],
+                "workflow_path": str(job["workflow_path"]),
+                "workflow_result_path": str(job["workflow_result_path"]),
+                "expected_panel_path": str(job["output_path"]),
+                "completed": False,
+                "error": "",
+            }
+            try:
+                attempt["result"] = generate_from_workflow(
+                    job["workflow_path"],
+                    job["output_path"],
+                    env_path=os.getenv("COMIC_PIPELINE_IMAGE_ENV_PATH") or None,
+                    prompt_suffix=prompt_suffix,
+                )
+                attempt["completed"] = True
+            except Exception as exc:
+                attempt["error"] = str(exc)
+                error_lower = attempt["error"].lower()
+                if "429" in error_lower or "rate limit" in error_lower:
+                    attempt["waiting_reason"] = "rate_limit"
+                elif any(token in error_lower for token in ("502", "503", "504", "unreachable", "temporarily unavailable")):
+                    attempt["waiting_reason"] = "upstream_error"
+            result["jobs_attempted"].append(attempt)
+
+        failed = [item for item in result["jobs_attempted"] if not item["completed"]]
+        completed = [item for item in result["jobs_attempted"] if item["completed"]]
+        waiting = [item for item in failed if item.get("waiting_reason")]
+        result["waiting"] = bool(waiting)
+        result["partial"] = bool(completed and (failed or result["jobs_deferred"]))
+        result["completed"] = not failed and not result["jobs_deferred"]
+        if waiting:
+            result["waiting_reason"] = waiting[0]["waiting_reason"]
+        elif result["jobs_deferred"]:
+            result["deferred_reason"] = "max_panels"
+        if failed and not waiting:
+            result["error"] = f"{len(failed)} panel(s) failed"
+    except Exception as exc:
+        result["error"] = str(exc)
+    finally:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
 def stage_generate_panels(args: argparse.Namespace, context: dict, pipeline_result: dict) -> dict:
     stage = base_stage("generate_panels")
     stage["outputs"] = {
@@ -697,6 +847,24 @@ def stage_generate_panels(args: argparse.Namespace, context: dict, pipeline_resu
         return finish(stage, "blocked", "Image generation is blocked by earlier gates.", blocking_stages=gate_blocks, stop_pipeline=True)
     if args.dry_run:
         return finish(stage, "would_run", "Dry run: image generation/recovery command was not executed.")
+    if args.image_backend == "direct_api":
+        recovery = generate_panels_direct(args, context)
+        stage["outputs"]["backend"] = "direct_api"
+        stage["recovery_summary"] = recovery_summary(recovery)
+        if recovery.get("waiting"):
+            return finish(
+                stage,
+                "waiting",
+                "Direct image generation is waiting for the upstream image API.",
+                waiting_reason=recovery.get("waiting_reason") or "upstream_image_api",
+                waiting_detail=recovery,
+                stop_pipeline=True,
+            )
+        if recovery.get("completed"):
+            return finish(stage, "passed", "Direct image generation completed.")
+        if recovery.get("partial"):
+            return finish(stage, "partial", "Direct image generation completed partially.")
+        return finish(stage, "failed", recovery.get("error") or "Direct image generation failed.")
     queue_state = comfy_queue_state(args.comfy_url)
     stage["outputs"]["queue_state_before_generation"] = queue_state
     if queue_state.get("running", 0) > 0 or queue_state.get("pending", 0) > 0:
@@ -1206,6 +1374,8 @@ def recovery_summary(recovery: dict) -> dict:
         "waiting": bool(recovery.get("waiting")),
         "error": recovery.get("error"),
         "jobs_discovered": int(recovery.get("jobs_discovered", 0) or 0),
+        "jobs_selected": int(recovery.get("jobs_selected", len(attempts)) or 0),
+        "jobs_deferred": int(recovery.get("jobs_deferred", 0) or 0),
         "jobs_attempted": len(attempts),
         "jobs_completed": len([item for item in attempts if item.get("completed")]),
         "jobs_skipped": len([item for item in attempts if item.get("skipped")]),
