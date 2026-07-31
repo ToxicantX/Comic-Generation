@@ -266,6 +266,43 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertFalse(health["generation_ready"])
         self.assertFalse(health["ok"])
 
+    def test_local_model_catalog_checks_nodes_and_selected_models(self):
+        server = load_server_module()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                nodes = {
+                    name: {"input": {"required": {field: [[value]]}}}
+                    for name, field, value in [
+                        ("CheckpointLoaderSimple", "ckpt_name", "comic.safetensors"),
+                        ("LoraLoader", "lora_name", "style.safetensors"),
+                        ("ControlNetLoader", "control_net_name", "lineart.pth"),
+                    ]
+                }
+                nodes.update({name: {} for name in [
+                    "CLIPTextEncode", "EmptyLatentImage", "KSampler", "VAEDecode", "SaveImage",
+                    "LoadImage", "ControlNetApplyAdvanced",
+                ]})
+                return json.dumps(nodes).encode("utf-8")
+
+        config = {
+            "COMIC_PIPELINE_COMFY_CHECKPOINT": "comic.safetensors",
+            "COMIC_PIPELINE_COMFY_LORA_NAME": "style.safetensors",
+            "COMIC_PIPELINE_COMFY_CONTROLNET_NAME": "lineart.pth",
+        }
+        with patch.object(server.urllib.request, "urlopen", return_value=Response()):
+            catalog = server.local_model_catalog("http://127.0.0.1:8188", config)
+
+        self.assertTrue(catalog["ok"])
+        self.assertEqual(catalog["missing_nodes"], [])
+        self.assertEqual(catalog["missing_models"], [])
+
     def test_save_config_rejects_unknown_image_backend_before_writing(self):
         server = load_server_module()
 

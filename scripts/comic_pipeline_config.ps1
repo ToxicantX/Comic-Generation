@@ -60,6 +60,8 @@ function Get-ComicPipelineConfig {
     $outputRoot = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_OUTPUT_ROOT" -Default (Join-Path $comfyOutputRoot "ComicPipeline")
     $imageEnvPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_ENV_PATH" -Default (Join-Path $Root "config\image.env")
     $imageQuality = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_QUALITY" -Default "auto"
+    $comfyLoraName = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_LORA_NAME"
+    $comfyControlnetName = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CONTROLNET_NAME"
     $novelPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_NOVEL_PATH" -Default (Join-Path $Root "novel.txt")
     $pythonPath = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_PYTHON_PATH"
     if (-not $pythonPath) {
@@ -78,6 +80,18 @@ function Get-ComicPipelineConfig {
         NovelPath = $novelPath
         ImageEnvPath = $imageEnvPath
         ImageBackend = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_BACKEND" -Default "direct_api"
+        ComfyCheckpoint = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CHECKPOINT"
+        ComfyLoraName = $comfyLoraName
+        ComfyLoraStrengthModel = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL" -Default "1.0")
+        ComfyLoraStrengthClip = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP" -Default "1.0")
+        ComfyControlnetName = $comfyControlnetName
+        ComfyControlnetStrength = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH" -Default "1.0")
+        ComfyControlnetStart = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CONTROLNET_START" -Default "0.0")
+        ComfyControlnetEnd = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CONTROLNET_END" -Default "1.0")
+        ComfySteps = [int](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_STEPS" -Default "28")
+        ComfyCfg = [double](Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_CFG" -Default "7.0")
+        ComfySampler = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_SAMPLER" -Default "dpmpp_2m"
+        ComfyScheduler = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_COMFY_SCHEDULER" -Default "karras"
         DatabaseUrl = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_DATABASE_URL" -Default "postgresql://comic_pipeline:comic_pipeline@127.0.0.1:54329/comic_pipeline"
         TextModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_TEXT_MODEL" -Default "gpt-4.1-mini"
         ImageModel = Get-ComicEnvValue -Values $values -Key "COMIC_PIPELINE_IMAGE_MODEL" -Default "gpt-image-2"
@@ -99,6 +113,18 @@ function Set-ComicPipelineProcessEnv {
     $env:COMIC_PIPELINE_NOVEL_PATH = [string]$Config.NovelPath
     $env:COMIC_PIPELINE_IMAGE_ENV_PATH = [string]$Config.ImageEnvPath
     $env:COMIC_PIPELINE_IMAGE_BACKEND = [string]$Config.ImageBackend
+    $env:COMIC_PIPELINE_COMFY_CHECKPOINT = [string]$Config.ComfyCheckpoint
+    $env:COMIC_PIPELINE_COMFY_LORA_NAME = [string]$Config.ComfyLoraName
+    $env:COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL = [string]$Config.ComfyLoraStrengthModel
+    $env:COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP = [string]$Config.ComfyLoraStrengthClip
+    $env:COMIC_PIPELINE_COMFY_CONTROLNET_NAME = [string]$Config.ComfyControlnetName
+    $env:COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH = [string]$Config.ComfyControlnetStrength
+    $env:COMIC_PIPELINE_COMFY_CONTROLNET_START = [string]$Config.ComfyControlnetStart
+    $env:COMIC_PIPELINE_COMFY_CONTROLNET_END = [string]$Config.ComfyControlnetEnd
+    $env:COMIC_PIPELINE_COMFY_STEPS = [string]$Config.ComfySteps
+    $env:COMIC_PIPELINE_COMFY_CFG = [string]$Config.ComfyCfg
+    $env:COMIC_PIPELINE_COMFY_SAMPLER = [string]$Config.ComfySampler
+    $env:COMIC_PIPELINE_COMFY_SCHEDULER = [string]$Config.ComfyScheduler
     $env:COMIC_PIPELINE_DATABASE_URL = [string]$Config.DatabaseUrl
     $env:COMIC_PIPELINE_TEXT_MODEL = [string]$Config.TextModel
     $env:COMIC_PIPELINE_IMAGE_MODEL = [string]$Config.ImageModel

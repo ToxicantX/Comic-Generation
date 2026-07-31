@@ -281,7 +281,9 @@ def inspect_workflow_json(workflow_panel: dict) -> dict:
         issues.append("workflow_json_missing_prompt_graph")
         return {"issues": issues, "warnings": warnings, "summary": summary, "reference_image_paths": [], "save_filename_prefixes": []}
 
-    image_nodes = nodes_by_class(prompt_graph, "OpenAICompatibleImageGenerate")
+    direct_nodes = nodes_by_class(prompt_graph, "OpenAICompatibleImageGenerate")
+    local_nodes = nodes_by_class(prompt_graph, "KSampler")
+    image_nodes = direct_nodes + local_nodes
     save_nodes = nodes_by_class(prompt_graph, "SaveImage")
     summary["image_generate_nodes"] = len(image_nodes)
     summary["save_image_nodes"] = len(save_nodes)
@@ -297,11 +299,26 @@ def inspect_workflow_json(workflow_panel: dict) -> dict:
     reference_paths = []
     prompt_texts = []
     negative_prompt_texts = []
-    for node in image_nodes:
+    for node in direct_nodes:
         inputs = node.get("inputs", {})
         reference_paths.extend(normalize_reference_paths(inputs.get("reference_image_paths", "")))
         prompt_texts.append(str(inputs.get("prompt", "")))
         negative_prompt_texts.append(str(inputs.get("negative_prompt", "")))
+    for node in nodes_by_class(prompt_graph, "LoadImage"):
+        inputs = node.get("inputs", {})
+        meta = node.get("_meta") or {}
+        reference_paths.extend(normalize_reference_paths(meta.get("comic_pipeline_reference_path", "")))
+        if not meta.get("comic_pipeline_reference_path"):
+            reference_paths.extend(normalize_reference_paths(inputs.get("image", "")))
+    for node in prompt_graph.values():
+        if not isinstance(node, dict) or node.get("class_type") != "CLIPTextEncode":
+            continue
+        role = (node.get("_meta") or {}).get("comic_pipeline_role")
+        text = str((node.get("inputs") or {}).get("text", ""))
+        if role == "positive_prompt":
+            prompt_texts.append(text)
+        elif role == "negative_prompt":
+            negative_prompt_texts.append(text)
 
     save_prefixes = []
     for node in save_nodes:
@@ -315,10 +332,11 @@ def inspect_workflow_json(workflow_panel: dict) -> dict:
     summary["has_no_text_prompt_instruction"] = any(has_no_text_instruction(text) for text in prompt_texts)
     summary["has_negative_text_ban"] = any(has_negative_text_ban(text) for text in negative_prompt_texts)
 
-    if not reference_paths:
+    reference_required = bool(direct_nodes or nodes_by_class(prompt_graph, "LoadImage"))
+    if reference_required and not reference_paths:
         issues.append("workflow_json_missing_reference_image_paths")
     for reference_path in reference_paths:
-        if not path_exists(reference_path):
+        if not reference_path_exists(reference_path):
             issues.append("workflow_json_reference_file_missing")
             break
     if not save_prefixes:
@@ -573,6 +591,16 @@ def normalized_path(value: str | Path) -> str:
 
 def path_exists(value: str) -> bool:
     return bool(value) and Path(value).is_file()
+
+
+def reference_path_exists(value: str) -> bool:
+    if path_exists(value):
+        return True
+    candidate = Path(value or "")
+    if candidate.is_absolute():
+        return False
+    comfy_root = Path(os.environ.get("COMIC_PIPELINE_COMFY_ROOT") or "")
+    return bool(comfy_root and (comfy_root / "input" / candidate).is_file())
 
 
 def markdown_image_path(value: str) -> str:

@@ -17,6 +17,8 @@ if ($PlanPath -eq "E:\workspace\ComfyUIProjects\manifests\ssj_comic_ep01_page01_
 if ($WorkflowDir -eq "E:\workspace\ComfyUIProjects\workflows\comic") { $WorkflowDir = Join-Path $comicConfig.Workspace "workflows\comic" }
 if ($ResultPath -eq "E:\workspace\ComfyUIProjects\manifests\ssj_comic_ep01_page01_workflows.json") { $ResultPath = Join-Path $comicConfig.Workspace "manifests\ssj_comic_ep01_page01_workflows.json" }
 if ($ImageModel -eq "gpt-image-2" -and $comicConfig.ImageModel) { $ImageModel = $comicConfig.ImageModel }
+$isLocalBackend = $comicConfig.ImageBackend -eq "comfyui"
+$localWorkflowBuilder = Join-Path $comicConfig.Workspace "scripts\comfy_workflow_template.py"
 
 if (-not (Test-Path -LiteralPath $PlanPath)) {
     throw "Plan file not found: $PlanPath"
@@ -73,6 +75,27 @@ function Get-PanelImageSize {
     return "1024x1024"
 }
 
+function Write-LocalComfyWorkflow {
+    param(
+        [hashtable]$Request,
+        [string]$WorkflowPath,
+        [string]$RequestPath
+    )
+
+    $Request | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $RequestPath -Encoding UTF8
+    try {
+        $python = Get-ComicPipelinePython -Config $comicConfig
+        & $python $localWorkflowBuilder --request-path $RequestPath --output-path $WorkflowPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Local ComfyUI workflow builder failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $RequestPath) {
+            Remove-Item -LiteralPath $RequestPath -Force
+        }
+    }
+}
+
 foreach ($panel in $plan.panels) {
     $suffix = ($panel.panel_id -replace '[^A-Za-z0-9_]+', '_').ToLowerInvariant()
     $workflowVariant = if ($UseFallbackPrompts) { "fallback" } else { "image" }
@@ -104,32 +127,73 @@ foreach ($panel in $plan.panels) {
         }
     }
 
-    $workflow = [ordered]@{
-        client_id = "codex-longform-comic"
-        prompt = [ordered]@{
-            "1" = [ordered]@{
-                class_type = "OpenAICompatibleImageGenerate"
-                inputs = [ordered]@{
-                    prompt = $prompt
-                    model = $ImageModel
-                    size = $panelImageSize
-                    quality = $comicConfig.ImageQuality
-                    negative_prompt = $negativeImage
-                    api_key_env_path = ".comic-pipeline/image.env"
+    $referenceImageInput = ""
+    if ($isLocalBackend -and $comicConfig.ComfyControlnetName -and $referenceImage -and (Test-Path -LiteralPath $referenceImage -PathType Leaf)) {
+        $inputDir = Join-Path $comicConfig.ComfyRoot "input\comic_pipeline"
+        New-Item -ItemType Directory -Path $inputDir -Force | Out-Null
+        $source = (Resolve-Path -LiteralPath $referenceImage).Path
+        $inputName = "$($suffix)_reference$([IO.Path]::GetExtension($source).ToLowerInvariant())"
+        $inputPath = Join-Path $inputDir $inputName
+        if ((Resolve-Path -LiteralPath $source).Path -ne $inputPath) {
+            Copy-Item -LiteralPath $source -Destination $inputPath -Force
+        }
+        $referenceImageInput = "comic_pipeline/$inputName"
+    }
+
+    if ($isLocalBackend) {
+        $requestPath = Join-Path $WorkflowDir "$($suffix)_request.json"
+        $workflowRequest = @{
+            prompt = $prompt
+            negative_prompt = $negativeImage
+            filename_prefix = $filenamePrefix
+            checkpoint = [string]$comicConfig.ComfyCheckpoint
+            image_size = $panelImageSize
+            seed = 0
+            steps = [int]$comicConfig.ComfySteps
+            cfg = [double]$comicConfig.ComfyCfg
+            sampler_name = [string]$comicConfig.ComfySampler
+            scheduler = [string]$comicConfig.ComfyScheduler
+            lora_name = [string]$comicConfig.ComfyLoraName
+            lora_strength_model = [double]$comicConfig.ComfyLoraStrengthModel
+            lora_strength_clip = [double]$comicConfig.ComfyLoraStrengthClip
+            controlnet_name = if ($referenceImageInput) { [string]$comicConfig.ComfyControlnetName } else { "" }
+            control_image = $referenceImageInput
+            control_source = $referenceImage
+            control_strength = [double]$comicConfig.ComfyControlnetStrength
+            control_start = [double]$comicConfig.ComfyControlnetStart
+            control_end = [double]$comicConfig.ComfyControlnetEnd
+            client_id = "codex-longform-comic-local"
+        }
+        Write-LocalComfyWorkflow -Request $workflowRequest -WorkflowPath $workflowPath -RequestPath $requestPath
+        $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else {
+        $workflow = [ordered]@{
+            client_id = "codex-longform-comic"
+            prompt = [ordered]@{
+                "1" = [ordered]@{
+                    class_type = "OpenAICompatibleImageGenerate"
+                    inputs = [ordered]@{
+                        prompt = $prompt
+                        model = $ImageModel
+                        size = $panelImageSize
+                        quality = $comicConfig.ImageQuality
+                        negative_prompt = $negativeImage
+                        api_key_env_path = ".comic-pipeline/image.env"
+                    }
                 }
-            }
-            "2" = [ordered]@{
-                class_type = "SaveImage"
-                inputs = [ordered]@{
-                    images = @("1", 0)
-                    filename_prefix = $filenamePrefix
+                "2" = [ordered]@{
+                    class_type = "SaveImage"
+                    inputs = [ordered]@{
+                        images = @("1", 0)
+                        filename_prefix = $filenamePrefix
+                    }
                 }
             }
         }
-    }
 
-    if ($referenceImage) {
-        $workflow.prompt."1".inputs.reference_image_paths = $referenceImage
+        if ($referenceImage) {
+            $workflow.prompt."1".inputs.reference_image_paths = $referenceImage
+        }
     }
 
     $workflow | ConvertTo-Json -Depth 20 | Set-Content -Path $workflowPath -Encoding UTF8
@@ -141,8 +205,10 @@ foreach ($panel in $plan.panels) {
         expected_panel_path = $expectedImagePath
         filename_prefix = $filenamePrefix
         image_size = $panelImageSize
+        image_backend = if ($isLocalBackend) { "comfyui" } else { "direct_api" }
         reference_alias = $referenceAlias
         reference_image = $referenceImage
+        reference_image_input = $referenceImageInput
         fallback = [bool]$UseFallbackPrompts
     }
 }

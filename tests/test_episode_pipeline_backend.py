@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -180,7 +181,11 @@ class EpisodePipelineBackendTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "passed")
         find_jobs.assert_not_called()
-        generate.assert_called_once_with(workflow, output, env_path=None)
+        generate.assert_called_once_with(
+            workflow,
+            output,
+            env_path=os.getenv("COMIC_PIPELINE_IMAGE_ENV_PATH") or None,
+        )
 
 
 if __name__ == "__main__":

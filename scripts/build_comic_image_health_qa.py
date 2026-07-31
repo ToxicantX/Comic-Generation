@@ -290,12 +290,19 @@ def read_expected_workflow_size(workflow_path: str) -> tuple[int, int] | None:
     if not isinstance(prompt, dict):
         return None
     for node in prompt.values():
-        if not isinstance(node, dict) or node.get("class_type") != "OpenAICompatibleImageGenerate":
+        if not isinstance(node, dict):
             continue
-        size = str((node.get("inputs") or {}).get("size", ""))
-        match = re.match(r"^\s*(\d+)\s*x\s*(\d+)\s*$", size)
-        if match:
-            return (int(match.group(1)), int(match.group(2)))
+        inputs = node.get("inputs") or {}
+        if node.get("class_type") == "OpenAICompatibleImageGenerate":
+            size = str(inputs.get("size", ""))
+            match = re.match(r"^\s*(\d+)\s*x\s*(\d+)\s*$", size)
+            if match:
+                return (int(match.group(1)), int(match.group(2)))
+        if node.get("class_type") == "EmptyLatentImage":
+            try:
+                return (int(inputs.get("width")), int(inputs.get("height")))
+            except (TypeError, ValueError):
+                continue
     return None
 
 

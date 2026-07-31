@@ -180,6 +180,11 @@ function getInt(id, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function getFloat(id, fallback) {
+  const value = Number.parseFloat($(id).value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function fileStem(filename) {
   return String(filename || "").replace(/\.[^/.\\]+$/, "").trim();
 }
@@ -798,6 +803,18 @@ async function loadConfig() {
   setValue("imageBackend", c.COMIC_PIPELINE_IMAGE_BACKEND || "direct_api");
   setValue("comfyUrl", c.COMIC_PIPELINE_COMFY_URL);
   setValue("comfyRoot", c.COMIC_PIPELINE_COMFY_ROOT);
+  setValue("comfyCheckpoint", c.COMIC_PIPELINE_COMFY_CHECKPOINT || "");
+  setValue("comfyLoraName", c.COMIC_PIPELINE_COMFY_LORA_NAME || "");
+  setValue("comfyLoraStrengthModel", c.COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL || "1.0");
+  setValue("comfyLoraStrengthClip", c.COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP || "1.0");
+  setValue("comfyControlnetName", c.COMIC_PIPELINE_COMFY_CONTROLNET_NAME || "");
+  setValue("comfyControlnetStrength", c.COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH || "1.0");
+  setValue("comfyControlnetStart", c.COMIC_PIPELINE_COMFY_CONTROLNET_START || "0.0");
+  setValue("comfyControlnetEnd", c.COMIC_PIPELINE_COMFY_CONTROLNET_END || "1.0");
+  setValue("comfySteps", c.COMIC_PIPELINE_COMFY_STEPS || "28");
+  setValue("comfyCfg", c.COMIC_PIPELINE_COMFY_CFG || "7.0");
+  setValue("comfySampler", c.COMIC_PIPELINE_COMFY_SAMPLER || "dpmpp_2m");
+  setValue("comfyScheduler", c.COMIC_PIPELINE_COMFY_SCHEDULER || "karras");
   setValue("novelPath", c.COMIC_PIPELINE_NOVEL_PATH);
   setValue("outputRoot", c.COMIC_PIPELINE_OUTPUT_ROOT);
   setValue("databaseUrl", c.COMIC_PIPELINE_DATABASE_URL);
@@ -855,6 +872,18 @@ function settingsPayloadFromForm() {
       COMIC_PIPELINE_IMAGE_BACKEND: $("imageBackend").value,
       COMIC_PIPELINE_COMFY_URL: $("comfyUrl").value,
       COMIC_PIPELINE_COMFY_ROOT: $("comfyRoot").value,
+      COMIC_PIPELINE_COMFY_CHECKPOINT: $("comfyCheckpoint").value,
+      COMIC_PIPELINE_COMFY_LORA_NAME: $("comfyLoraName").value,
+      COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL: String(getFloat("comfyLoraStrengthModel", 1)),
+      COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP: String(getFloat("comfyLoraStrengthClip", 1)),
+      COMIC_PIPELINE_COMFY_CONTROLNET_NAME: $("comfyControlnetName").value,
+      COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH: String(Math.max(getFloat("comfyControlnetStrength", 1), 0)),
+      COMIC_PIPELINE_COMFY_CONTROLNET_START: String(Math.min(Math.max(getFloat("comfyControlnetStart", 0), 0), 0.99)),
+      COMIC_PIPELINE_COMFY_CONTROLNET_END: String(Math.min(Math.max(getFloat("comfyControlnetEnd", 1), 0.01), 1)),
+      COMIC_PIPELINE_COMFY_STEPS: String(Math.max(getInt("comfySteps", 28), 1)),
+      COMIC_PIPELINE_COMFY_CFG: String(Math.max(getFloat("comfyCfg", 7), 0.1)),
+      COMIC_PIPELINE_COMFY_SAMPLER: $("comfySampler").value,
+      COMIC_PIPELINE_COMFY_SCHEDULER: $("comfyScheduler").value,
       COMIC_PIPELINE_NOVEL_PATH: $("novelPath").value,
       COMIC_PIPELINE_OUTPUT_ROOT: $("outputRoot").value,
       COMIC_PIPELINE_DATABASE_URL: $("databaseUrl").value,
@@ -5492,6 +5521,11 @@ function renderGenerationBackendDiagnostics(data = state.generationBackend) {
   }
   const paths = source.paths || {};
   const logs = source.logs || {};
+  const modelCatalog = source.health?.model_catalog || {};
+  const modelIssues = [
+    ...(modelCatalog.missing_nodes || []).map((item) => `节点:${item}`),
+    ...(modelCatalog.missing_models || []).map((item) => `模型:${item}`),
+  ];
   const stderrTail = source.ok
     ? "后端已运行，健康检查通过。"
     : (logs.stderr?.tail || "").trim().split(/\r?\n/).slice(-4).join(" / ");
@@ -5503,7 +5537,7 @@ function renderGenerationBackendDiagnostics(data = state.generationBackend) {
       <div><dt>状态</dt><dd>${source.ok ? "健康检查通过" : "不可访问或检查未通过"}</dd></div>
       <div><dt>地址</dt><dd>${escapeHtml(source.comfy_url || "-")} / 端口 ${source.port_open ? "已打开" : "未打开"}</dd></div>
       <div><dt>入口</dt><dd>${paths.main_py?.exists ? "main.py 存在" : "main.py 缺失"} · ${paths.python?.exists ? "Python 可用" : "Python 不可用"}</dd></div>
-      <div><dt>模型</dt><dd>${escapeHtml(modelSummary)}</dd></div>
+      <div><dt>模型</dt><dd>${escapeHtml(modelSummary)}${modelIssues.length ? ` · ${escapeHtml(modelIssues.join(" / "))}` : ""}</dd></div>
       <div><dt>日志</dt><dd>${escapeHtml(stderrTail || "暂无错误日志")}</dd></div>
     </dl>
   `;

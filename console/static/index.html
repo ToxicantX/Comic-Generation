@@ -715,7 +715,7 @@
         </section>
 
         <section class="settings-grid">
-          <section class="panel">
+          <section class="panel settings-backend-panel">
             <div class="section-head">
               <div>
                 <p class="eyebrow">图片生成</p>
@@ -734,6 +734,25 @@
               <legend>ComfyUI 可选配置</legend>
               <label>ComfyUI 地址<input id="comfyUrl" autocomplete="off"></label>
               <label>ComfyUI 根目录<input id="comfyRoot" autocomplete="off"></label>
+              <label>Checkpoint 文件名<input id="comfyCheckpoint" placeholder="例如：comic_model.safetensors" autocomplete="off"></label>
+              <div class="comfy-template-grid">
+                <label>LoRA 文件名<input id="comfyLoraName" placeholder="可留空" autocomplete="off"></label>
+                <label>LoRA 模型权重<input id="comfyLoraStrengthModel" type="number" step="0.05" value="1"></label>
+                <label>LoRA 文本权重<input id="comfyLoraStrengthClip" type="number" step="0.05" value="1"></label>
+              </div>
+              <div class="comfy-template-grid">
+                <label>ControlNet 文件名<input id="comfyControlnetName" placeholder="可留空" autocomplete="off"></label>
+                <label>ControlNet 强度<input id="comfyControlnetStrength" type="number" min="0" step="0.05" value="1"></label>
+                <label>开始百分比<input id="comfyControlnetStart" type="number" min="0" max="0.99" step="0.05" value="0"></label>
+                <label>结束百分比<input id="comfyControlnetEnd" type="number" min="0.01" max="1" step="0.05" value="1"></label>
+              </div>
+              <div class="comfy-template-grid">
+                <label>采样步数<input id="comfySteps" type="number" min="1" step="1" value="28"></label>
+                <label>CFG<input id="comfyCfg" type="number" min="0.1" step="0.1" value="7"></label>
+                <label>采样器<input id="comfySampler" value="dpmpp_2m" autocomplete="off"></label>
+                <label>调度器<input id="comfyScheduler" value="karras" autocomplete="off"></label>
+              </div>
+              <small class="settings-note">工作流会使用这里的 Checkpoint、采样参数和可选 LoRA。只有分镜存在参考图且配置了 ControlNet 时，才会生成 ControlNet 节点链。</small>
             </fieldset>
             <label>输出目录<input id="outputRoot" autocomplete="off"></label>
             <div class="backend-actions">

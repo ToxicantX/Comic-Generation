@@ -519,11 +519,19 @@ def update_page_workflows(page_plan_path: Path, page_plan: dict) -> None:
         workflow = read_json(workflow_path)
         changed = False
         for node in (workflow.get("prompt") or {}).values():
-            if not isinstance(node, dict) or node.get("class_type") != "OpenAICompatibleImageGenerate":
+            if not isinstance(node, dict):
                 continue
             inputs = node.setdefault("inputs", {})
+            is_direct_node = node.get("class_type") == "OpenAICompatibleImageGenerate"
+            is_local_positive = (
+                node.get("class_type") == "CLIPTextEncode"
+                and (node.get("_meta") or {}).get("comic_pipeline_role") == "positive_prompt"
+            )
+            if not is_direct_node and not is_local_positive:
+                continue
             global_prompt = page_plan.get("global_prompt_block") or "中国神话幻想漫画，水墨与厚涂结合，清晰剪影，电影分镜。"
-            inputs["prompt"] = f"{global_prompt}\n\n{panel_prompts.get(panel_id, '')}".strip()
+            prompt_key = "prompt" if is_direct_node else "text"
+            inputs[prompt_key] = f"{global_prompt}\n\n{panel_prompts.get(panel_id, '')}".strip()
             changed = True
         if changed:
             workflow_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")

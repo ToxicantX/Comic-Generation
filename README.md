@@ -7,7 +7,7 @@
 - `direct_api`：默认模式，控制台直连 OpenAI-compatible 图片 API，不依赖 ComfyUI 或 `8188`。
 - `comfyui`：可选本地模型模式，用于本地 checkpoint、LoRA、ControlNet 和可视化工作流。它是正式支持的后端，不是待清理的迁移代码。
 
-当前自动生成的默认图片工作流仍使用 `OpenAICompatibleImageGenerate`。ComfyUI 后端可以执行已有的 API-format 本地工作流；自动创建 checkpoint、LoRA、ControlNet 节点图属于后续工作流模板功能，不在当前版本范围内。
+`comfyui` 后端会按控制台中的本地模板配置生成 ComfyUI API-format workflow：基础链为 checkpoint、双提示词、空 latent、KSampler、VAE 解码和 SaveImage；配置 LoRA 后增加 LoRA 链；同时存在可用参考图和 ControlNet 模型时增加 ControlNet 链。`direct_api` 仍使用 `OpenAICompatibleImageGenerate`，默认行为不变。
 
 ## 目录
 
@@ -97,6 +97,25 @@ powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
 - `config/image.env`: `OPENAI_API_KEY`、`OPENAI_BASE_URL`。
 
 选择 `comfyui` 时，可以在 ComfyUI 中添加 `comic/pipeline -> 漫画流水线配置` 节点检查当前配置。这个节点只显示 API Key 是否已配置，不输出明文 key。
+
+### ComfyUI 本地模板配置
+
+选择 `comfyui` 后，在控制台 `设置 -> 生成后端` 中填写：
+
+- `Checkpoint 文件名`：必须是 `ComfyUImodelscheckpoints` 中的文件名。
+- `LoRA 文件名` 和两个 LoRA 权重：可留空；填写后素材与分镜工作流会插入 `LoraLoader`。
+- `ControlNet 文件名` 和强度区间：可留空；只有分镜或素材有真实参考图时才会插入 `LoadImage -> ControlNetLoader -> ControlNetApplyAdvanced`。
+- 采样步数、CFG、采样器和调度器：写入 `KSampler`。
+
+控制台的后端检查会读取 ComfyUI `/object_info`，核对基础节点以及已选模型。只有“端口可访问”而没有实际 checkpoint 时，状态仍会显示未就绪，这是预期行为。模型目录至少需要准备：
+
+```text
+<ComfyUI根目录>\models\checkpoints\<checkpoint>
+<ComfyUI根目录>\models\loras\<lora>             # 使用 LoRA 时
+<ComfyUI根目录>\models\controlnet\<controlnet>   # 使用 ControlNet 时
+```
+
+生成分镜参考图会复制到 `<ComfyUI根目录>\input\comic_pipeline`，工作流中的 `LoadImage` 使用该目录下的稳定相对路径；原始参考图路径同时写入工作流元数据，供一致性 QA 校验。生成出的 API-format workflow 会写入 `workflows/comic/`，按章节生成的文件属于运行产物，不应提交。
 
 ## 可选：安装到 ComfyUI
 

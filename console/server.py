@@ -28,6 +28,7 @@ sys.path.insert(0, str(_ROOT_FOR_IMPORTS / "scripts"))
 from process_novel import build_chapter_index, fallback_chapter_index
 from image_provider import image_api_url, normalize_backend
 from text_model_client import chat_json
+from comfy_workflow_template import build_local_image_workflow, local_workflow_options
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,18 @@ PIPELINE_KEYS = [
     "COMIC_PIPELINE_TEXT_ENV_PATH",
     "COMIC_PIPELINE_IMAGE_ENV_PATH",
     "COMIC_PIPELINE_IMAGE_BACKEND",
+    "COMIC_PIPELINE_COMFY_CHECKPOINT",
+    "COMIC_PIPELINE_COMFY_LORA_NAME",
+    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL",
+    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_NAME",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_START",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_END",
+    "COMIC_PIPELINE_COMFY_STEPS",
+    "COMIC_PIPELINE_COMFY_CFG",
+    "COMIC_PIPELINE_COMFY_SAMPLER",
+    "COMIC_PIPELINE_COMFY_SCHEDULER",
     "COMIC_PIPELINE_DATABASE_URL",
     "COMIC_PIPELINE_TEXT_MODEL",
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT",
@@ -91,6 +104,18 @@ DEFAULTS = {
     "COMIC_PIPELINE_TEXT_ENV_PATH": str(TEXT_ENV_PATH),
     "COMIC_PIPELINE_IMAGE_ENV_PATH": str(IMAGE_ENV_PATH),
     "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+    "COMIC_PIPELINE_COMFY_CHECKPOINT": "",
+    "COMIC_PIPELINE_COMFY_LORA_NAME": "",
+    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL": "1.0",
+    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP": "1.0",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_NAME": "",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH": "1.0",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_START": "0.0",
+    "COMIC_PIPELINE_COMFY_CONTROLNET_END": "1.0",
+    "COMIC_PIPELINE_COMFY_STEPS": "28",
+    "COMIC_PIPELINE_COMFY_CFG": "7.0",
+    "COMIC_PIPELINE_COMFY_SAMPLER": "dpmpp_2m",
+    "COMIC_PIPELINE_COMFY_SCHEDULER": "karras",
     "COMIC_PIPELINE_DATABASE_URL": "postgresql://comic_pipeline:comic_pipeline@127.0.0.1:54329/comic_pipeline",
     "COMIC_PIPELINE_TEXT_MODEL": "gpt-4.1-mini",
     "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "300",
@@ -215,6 +240,18 @@ def runtime_config() -> dict:
         if key in os.environ:
             config[key] = os.environ[key]
     return config
+
+
+def validate_local_template_config(config: dict) -> None:
+    options = local_workflow_options(config)
+    if options["steps"] < 1:
+        raise ValueError("COMIC_PIPELINE_COMFY_STEPS must be at least 1")
+    if options["cfg"] <= 0:
+        raise ValueError("COMIC_PIPELINE_COMFY_CFG must be greater than 0")
+    if options["control_strength"] < 0:
+        raise ValueError("COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH must not be negative")
+    if not 0 <= options["control_start"] < options["control_end"] <= 1:
+        raise ValueError("COMIC_PIPELINE_COMFY_CONTROLNET_START and END must satisfy 0 <= start < end <= 1")
 
 
 def provider_env_state(path: Path) -> dict:
@@ -490,6 +527,7 @@ def save_config(payload: dict) -> dict:
     for key in PIPELINE_KEYS:
         if key in incoming:
             current[key] = str(incoming[key])
+    validate_local_template_config(current)
     text_path = Path(current.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH)
     image_path = Path(current.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
     backups = {
@@ -1033,6 +1071,18 @@ def asset_image_size(category: str) -> str:
     return "1024x1536"
 
 
+def copy_comfy_input_image(source_path: str | Path, token: str, comfy_root: str | Path) -> str:
+    source = Path(source_path or "")
+    if not source.is_file():
+        return ""
+    input_dir = Path(comfy_root) / "input" / "comic_pipeline"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    destination = input_dir / f"{safe_stem(token)}_{safe_stem(source.stem)}{source.suffix.lower()}"
+    if source.resolve() != destination.resolve():
+        shutil.copy2(source, destination)
+    return f"comic_pipeline/{destination.name}"
+
+
 def create_asset_workflow(
     alias: str,
     category: str,
@@ -1053,6 +1103,33 @@ def create_asset_workflow(
     negative_prompt = ASSET_NEGATIVE_PROMPT
     if approved_negative_prompt.strip():
         negative_prompt += f", {approved_negative_prompt.strip()}"
+    if normalize_backend(config.get("COMIC_PIPELINE_IMAGE_BACKEND")) == "comfyui":
+        options = local_workflow_options(config)
+        control_image = ""
+        if options["controlnet_name"] and reference_path:
+            control_image = copy_comfy_input_image(
+                reference_path,
+                f"asset_{target_stem}",
+                config.get("COMIC_PIPELINE_COMFY_ROOT") or DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"],
+            )
+        if not control_image:
+            options["controlnet_name"] = ""
+        workflow = build_local_image_workflow(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            filename_prefix=filename_prefix_for_output(target_path),
+            image_size=asset_image_size(category),
+            seed=0,
+            control_image=control_image,
+            control_source=str(reference_path or ""),
+            **options,
+        )
+        workflow["comic_pipeline"] = {
+            "kind": "asset",
+            "reference_image": str(reference_path or ""),
+        }
+        workflow_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
+        return workflow_path
     inputs = {
         "prompt": prompt,
         "model": config.get("COMIC_PIPELINE_IMAGE_MODEL", DEFAULTS["COMIC_PIPELINE_IMAGE_MODEL"]),
@@ -2343,15 +2420,23 @@ def inject_generation_context_into_workflow(workflow_path: Path, context_snapsho
         return workflow_path
     changed = False
     for node in (workflow.get("prompt") or {}).values():
-        if not isinstance(node, dict) or node.get("class_type") != "OpenAICompatibleImageGenerate":
+        if not isinstance(node, dict):
             continue
         inputs = node.get("inputs")
         if not isinstance(inputs, dict):
             continue
-        current_prompt = str(inputs.get("prompt") or "")
+        is_direct_node = node.get("class_type") == "OpenAICompatibleImageGenerate"
+        is_local_positive = (
+            node.get("class_type") == "CLIPTextEncode"
+            and (node.get("_meta") or {}).get("comic_pipeline_role") == "positive_prompt"
+        )
+        if not is_direct_node and not is_local_positive:
+            continue
+        prompt_key = "prompt" if is_direct_node else "text"
+        current_prompt = str(inputs.get(prompt_key) or "")
         if "[生成上下文]" in current_prompt:
             continue
-        inputs["prompt"] = current_prompt.rstrip() + prompt_block
+        inputs[prompt_key] = current_prompt.rstrip() + prompt_block
         changed = True
     if not changed:
         return workflow_path
@@ -5050,6 +5135,18 @@ def run_regenerate_page_job(job_id: str) -> None:
         "COMIC_PIPELINE_OUTPUT_ROOT": config.get("COMIC_PIPELINE_OUTPUT_ROOT", ""),
         "COMIC_PIPELINE_IMAGE_ENV_PATH": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH", ""),
         "COMIC_PIPELINE_IMAGE_BACKEND": config.get("COMIC_PIPELINE_IMAGE_BACKEND", "direct_api"),
+        "COMIC_PIPELINE_COMFY_CHECKPOINT": config.get("COMIC_PIPELINE_COMFY_CHECKPOINT", ""),
+        "COMIC_PIPELINE_COMFY_LORA_NAME": config.get("COMIC_PIPELINE_COMFY_LORA_NAME", ""),
+        "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL": config.get("COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL", "1.0"),
+        "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP": config.get("COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP", "1.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_NAME": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_NAME", ""),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH", "1.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_START": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_START", "0.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_END": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_END", "1.0"),
+        "COMIC_PIPELINE_COMFY_STEPS": config.get("COMIC_PIPELINE_COMFY_STEPS", "28"),
+        "COMIC_PIPELINE_COMFY_CFG": config.get("COMIC_PIPELINE_COMFY_CFG", "7.0"),
+        "COMIC_PIPELINE_COMFY_SAMPLER": config.get("COMIC_PIPELINE_COMFY_SAMPLER", "dpmpp_2m"),
+        "COMIC_PIPELINE_COMFY_SCHEDULER": config.get("COMIC_PIPELINE_COMFY_SCHEDULER", "karras"),
         "COMIC_PIPELINE_IMAGE_MODEL": config.get("COMIC_PIPELINE_IMAGE_MODEL", ""),
         "COMIC_PIPELINE_PYTHON_PATH": config.get("COMIC_PIPELINE_PYTHON_PATH", ""),
         "PYTHONIOENCODING": "utf-8",
@@ -5211,6 +5308,7 @@ def comfy_health() -> dict:
             for future in as_completed(futures):
                 name, result = future.result()
                 checks[name] = result
+    model_catalog = local_model_catalog(comfy_url, effective) if image_backend == "comfyui" else {}
 
     text_key_path = Path(config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH)
     image_key_path = Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
@@ -5230,7 +5328,10 @@ def comfy_health() -> dict:
             output_root_error = str(exc)
     output_root_exists = bool(output_root_value and Path(output_root_value).is_dir())
     generation_ready = (
-        all(item.get("ok") for item in checks.values()) and comfy_root_exists and comfy_output_exists
+        all(item.get("ok") for item in checks.values())
+        and comfy_root_exists
+        and comfy_output_exists
+        and model_catalog.get("ok", False)
         if image_backend == "comfyui"
         else bool(image.get("OPENAI_API_KEY", "").strip()) and output_root_exists
     )
@@ -5238,6 +5339,7 @@ def comfy_health() -> dict:
         "comfy_url": comfy_url,
         "image_backend": image_backend,
         "checks": checks,
+        "model_catalog": model_catalog,
         "generation_ready": generation_ready,
         "ok": bool(database.get("schema_ready")) and generation_ready,
         "paths": {
@@ -5272,6 +5374,91 @@ def tcp_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def local_model_catalog(comfy_url: str, config: dict) -> dict:
+    required_nodes = {
+        "CheckpointLoaderSimple",
+        "CLIPTextEncode",
+        "EmptyLatentImage",
+        "KSampler",
+        "VAEDecode",
+        "SaveImage",
+    }
+    if str(config.get("COMIC_PIPELINE_COMFY_LORA_NAME") or "").strip():
+        required_nodes.add("LoraLoader")
+    if str(config.get("COMIC_PIPELINE_COMFY_CONTROLNET_NAME") or "").strip():
+        required_nodes.update({"LoadImage", "ControlNetLoader", "ControlNetApplyAdvanced"})
+
+    try:
+        with urllib.request.urlopen(f"{comfy_url.rstrip('/')}/object_info", timeout=3) as response:
+            object_info = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "object_info_ok": False,
+            "error": str(exc),
+            "required_nodes": sorted(required_nodes),
+            "missing_nodes": sorted(required_nodes),
+            "models": {},
+            "missing_models": [],
+        }
+
+    available_nodes = set(object_info) if isinstance(object_info, dict) else set()
+    missing_nodes = sorted(required_nodes - available_nodes)
+
+    def choices(node_name: str, input_name: str) -> list[str]:
+        node_info = object_info.get(node_name) if isinstance(object_info, dict) else None
+        required = (node_info or {}).get("input", {}).get("required", {}) if isinstance(node_info, dict) else {}
+        value = required.get(input_name)
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            return [str(item) for item in value[0]]
+        return []
+
+    model_values = {
+        "checkpoint": str(config.get("COMIC_PIPELINE_COMFY_CHECKPOINT") or "").strip(),
+        "lora": str(config.get("COMIC_PIPELINE_COMFY_LORA_NAME") or "").strip(),
+        "controlnet": str(config.get("COMIC_PIPELINE_COMFY_CONTROLNET_NAME") or "").strip(),
+    }
+    model_choices = {
+        "checkpoint": choices("CheckpointLoaderSimple", "ckpt_name"),
+        "lora": choices("LoraLoader", "lora_name"),
+        "controlnet": choices("ControlNetLoader", "control_net_name"),
+    }
+    model_nodes = {
+        "checkpoint": ("CheckpointLoaderSimple", "ckpt_name"),
+        "lora": ("LoraLoader", "lora_name"),
+        "controlnet": ("ControlNetLoader", "control_net_name"),
+    }
+    missing_models = []
+    for model_key, model_name in model_values.items():
+        if not model_name:
+            if model_key == "checkpoint":
+                missing_models.append("checkpoint_not_configured")
+            continue
+        node_name, _ = model_nodes[model_key]
+        if node_name not in available_nodes:
+            continue
+        available = model_choices[model_key]
+        if not available or model_name not in available:
+            missing_models.append(model_key)
+
+    return {
+        "ok": not missing_nodes and not missing_models,
+        "object_info_ok": True,
+        "required_nodes": sorted(required_nodes),
+        "available_nodes": sorted(required_nodes & available_nodes),
+        "missing_nodes": missing_nodes,
+        "models": {
+            key: {
+                "configured": model_values[key],
+                "available": model_choices[key],
+                "configured_exists": bool(model_values[key] and (not model_choices[key] or model_values[key] in model_choices[key])),
+            }
+            for key in model_values
+        },
+        "missing_models": missing_models,
+    }
 
 
 def tail_text(path: Path, max_chars: int = 4000) -> str:
@@ -5545,6 +5732,15 @@ def settings_summary() -> dict:
     image = snapshot.get("image", {})
     return {
         "image_backend": normalize_backend(effective.get("COMIC_PIPELINE_IMAGE_BACKEND")),
+        "local_workflow": {
+            "checkpoint": effective.get("COMIC_PIPELINE_COMFY_CHECKPOINT", ""),
+            "lora_name": effective.get("COMIC_PIPELINE_COMFY_LORA_NAME", ""),
+            "controlnet_name": effective.get("COMIC_PIPELINE_COMFY_CONTROLNET_NAME", ""),
+            "steps": effective.get("COMIC_PIPELINE_COMFY_STEPS", "28"),
+            "cfg": effective.get("COMIC_PIPELINE_COMFY_CFG", "7.0"),
+            "sampler": effective.get("COMIC_PIPELINE_COMFY_SAMPLER", "dpmpp_2m"),
+            "scheduler": effective.get("COMIC_PIPELINE_COMFY_SCHEDULER", "karras"),
+        },
         "models": {
             "novel_model": effective.get("COMIC_PIPELINE_TEXT_MODEL", ""),
             "novel_timeout": effective.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT", ""),
@@ -5601,6 +5797,11 @@ def health_check_summary() -> dict:
     image_backend = settings.get("image_backend") or "direct_api"
     image_api_required = image_backend == "direct_api"
     output_root_path = settings.get("paths", {}).get("output_root", "")
+    model_catalog = health.get("model_catalog") or {}
+    model_issues = [
+        *[f"缺少节点 {item}" for item in model_catalog.get("missing_nodes", [])],
+        *[f"模型不可用 {item}" for item in model_catalog.get("missing_models", [])],
+    ]
     checks = [
         {
             "name": "postgres",
@@ -5622,9 +5823,11 @@ def health_check_summary() -> dict:
                 else "ComfyUI 输出目录未挂载"
                 if not health.get("paths", {}).get("comfy_root", {}).get("exists")
                 or not health.get("paths", {}).get("comfy_output_root", {}).get("exists")
+                else f"ComfyUI 本地模型环境未就绪：{'、'.join(model_issues)}"
+                if model_issues
                 else "ComfyUI 不可访问"
             ),
-            "detail": health.get("checks", {}),
+            "detail": {"endpoints": health.get("checks", {}), "model_catalog": model_catalog},
         },
         {
             "name": "text_api_key",
@@ -9431,6 +9634,18 @@ def run_job(job_id: str) -> None:
         "COMIC_PIPELINE_TEXT_ENV_PATH": config.get("COMIC_PIPELINE_TEXT_ENV_PATH", ""),
         "COMIC_PIPELINE_IMAGE_ENV_PATH": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH", ""),
         "COMIC_PIPELINE_IMAGE_BACKEND": config.get("COMIC_PIPELINE_IMAGE_BACKEND", "direct_api"),
+        "COMIC_PIPELINE_COMFY_CHECKPOINT": config.get("COMIC_PIPELINE_COMFY_CHECKPOINT", ""),
+        "COMIC_PIPELINE_COMFY_LORA_NAME": config.get("COMIC_PIPELINE_COMFY_LORA_NAME", ""),
+        "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL": config.get("COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL", "1.0"),
+        "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP": config.get("COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP", "1.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_NAME": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_NAME", ""),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH", "1.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_START": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_START", "0.0"),
+        "COMIC_PIPELINE_COMFY_CONTROLNET_END": config.get("COMIC_PIPELINE_COMFY_CONTROLNET_END", "1.0"),
+        "COMIC_PIPELINE_COMFY_STEPS": config.get("COMIC_PIPELINE_COMFY_STEPS", "28"),
+        "COMIC_PIPELINE_COMFY_CFG": config.get("COMIC_PIPELINE_COMFY_CFG", "7.0"),
+        "COMIC_PIPELINE_COMFY_SAMPLER": config.get("COMIC_PIPELINE_COMFY_SAMPLER", "dpmpp_2m"),
+        "COMIC_PIPELINE_COMFY_SCHEDULER": config.get("COMIC_PIPELINE_COMFY_SCHEDULER", "karras"),
         "COMIC_PIPELINE_TEXT_MODEL": config.get("COMIC_PIPELINE_TEXT_MODEL", ""),
         "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": config.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT", ""),
         "COMIC_PIPELINE_TEXT_MODEL_STREAM": config.get("COMIC_PIPELINE_TEXT_MODEL_STREAM", ""),

@@ -15,6 +15,10 @@ class SettingsUiTest(unittest.TestCase):
         self.assertIn('<option value="comfyui">', html)
         self.assertIn('COMIC_PIPELINE_IMAGE_BACKEND: $("imageBackend").value', app)
         self.assertIn('setValue("imageBackend",', app)
+        self.assertIn('id="comfyCheckpoint"', html)
+        self.assertIn('id="comfyLoraName"', html)
+        self.assertIn('id="comfyControlnetName"', html)
+        self.assertIn('COMIC_PIPELINE_COMFY_CHECKPOINT: $("comfyCheckpoint").value', app)
 
     def test_direct_mode_keeps_comfyui_controls_visible_but_optional(self):
         html = (ROOT / "console" / "static" / "index.html").read_text(encoding="utf-8")

@@ -51,6 +51,8 @@ class PowerShellConfigTest(unittest.TestCase):
         self.assertIn("$envValue", script)
         self.assertIn("COMIC_PIPELINE_IMAGE_QUALITY", script)
         self.assertIn("COMIC_PIPELINE_IMAGE_BACKEND", script)
+        self.assertIn("COMIC_PIPELINE_COMFY_CHECKPOINT", script)
+        self.assertIn("COMIC_PIPELINE_COMFY_CONTROLNET_NAME", script)
 
     def test_configure_defaults_to_direct_api_and_local_output(self):
         script = (ROOT / "configure.ps1").read_text(encoding="utf-8")
@@ -60,6 +62,84 @@ class PowerShellConfigTest(unittest.TestCase):
         self.assertIn("COMIC_PIPELINE_IMAGE_BACKEND=$ImageBackend", script)
         self.assertIn('Join-Path $root "output"', script)
         self.assertIn("COMIC_PIPELINE_OUTPUT_ROOT=$(Join-Path $imageOutputRoot 'ComicPipeline')", script)
+        self.assertIn("COMIC_PIPELINE_COMFY_CHECKPOINT=$ComfyCheckpoint", script)
+
+    @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
+    def test_local_panel_workflow_uses_shared_template_and_controlnet_input(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            comfy_root = root / "comfy"
+            reference = root / "reference.png"
+            reference.write_bytes(b"fake image")
+            plan_path = root / "plan.json"
+            workflow_dir = root / "workflows"
+            result_path = root / "result.json"
+            config_path = root / "config.env"
+            plan_path.write_text(json.dumps({
+                "project": "测试",
+                "episode_id": "TEST_EP01",
+                "page_id": "TEST_EP01_P001",
+                "global_prompt_block": "中国神话幻想漫画，无画面内文字",
+                "negative_prompt": "text, watermark",
+                "panels": [{
+                    "panel_id": "TEST_EP01_P001_PANEL01",
+                    "order": 1,
+                    "prompt": "主角站在山巅",
+                    "reference_image": str(reference),
+                    "reference_alias": "主角",
+                    "filename_prefix": "ComicPipeline/panels/test_panel",
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            config_path.write_text(
+                "\n".join([
+                    f"COMIC_PIPELINE_WORKSPACE={ROOT}",
+                    "COMIC_PIPELINE_IMAGE_BACKEND=comfyui",
+                    f"COMIC_PIPELINE_COMFY_ROOT={comfy_root}",
+                    f"COMIC_PIPELINE_COMFY_OUTPUT_ROOT={root / 'output'}",
+                    "COMIC_PIPELINE_COMFY_CHECKPOINT=checkpoint.safetensors",
+                    "COMIC_PIPELINE_COMFY_LORA_NAME=style.safetensors",
+                    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL=0.8",
+                    "COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP=0.6",
+                    "COMIC_PIPELINE_COMFY_CONTROLNET_NAME=lineart.pth",
+                    "COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH=0.7",
+                    "COMIC_PIPELINE_COMFY_CONTROLNET_START=0.1",
+                    "COMIC_PIPELINE_COMFY_CONTROLNET_END=0.9",
+                    "COMIC_PIPELINE_COMFY_STEPS=24",
+                    "COMIC_PIPELINE_COMFY_CFG=6.5",
+                    "COMIC_PIPELINE_COMFY_SAMPLER=dpmpp_2m",
+                    "COMIC_PIPELINE_COMFY_SCHEDULER=karras",
+                    "COMIC_PIPELINE_PYTHON_PATH=python",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "COMIC_PIPELINE_CONFIG_PATH": str(config_path),
+                "COMIC_PIPELINE_WORKSPACE": str(ROOT),
+            })
+            result = subprocess.run(
+                [powershell_command(), "-NoProfile", "-File", str(ROOT / "scripts" / "create_comic_panel_workflows.ps1"),
+                 "-PlanPath", str(plan_path), "-WorkflowDir", str(workflow_dir), "-ResultPath", str(result_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            workflow_path = workflow_dir / "test_ep01_p001_panel01_image_v001.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8-sig"))
+            graph = workflow["prompt"]
+            self.assertEqual(graph["1"]["class_type"], "CheckpointLoaderSimple")
+            self.assertEqual(graph["2"]["class_type"], "LoraLoader")
+            self.assertEqual(graph["7"]["class_type"], "ControlNetLoader")
+            self.assertEqual(graph["9"]["inputs"]["steps"], 24)
+            self.assertEqual(graph["9"]["inputs"]["cfg"], 6.5)
+            copied = comfy_root / "input" / "comic_pipeline" / "test_ep01_p001_panel01_reference.png"
+            self.assertTrue(copied.is_file())
+            manifest = json.loads(result_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual(manifest["created"][0]["image_backend"], "comfyui")
 
     @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
     def test_wait_script_exits_on_comfy_error(self):

@@ -2065,6 +2065,10 @@ button.primary:hover { background: var(--accent-strong); color: #fff; }
   align-items: start;
 }
 
+.settings-backend-panel {
+  grid-column: span 2;
+}
+
 .settings-source-panel,
 .settings-health-panel {
   min-width: 0;
@@ -2235,6 +2239,16 @@ button.primary:hover { background: var(--accent-strong); color: #fff; }
 
 .backend-optional-fields:disabled {
   opacity: 0.58;
+}
+
+.comfy-template-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.comfy-template-grid label {
+  min-width: 0;
 }
 
 .backend-diagnostics {
