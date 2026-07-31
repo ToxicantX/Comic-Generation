@@ -76,6 +76,98 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(command[command.index("-PollSeconds") + 1], "9")
         self.assertEqual(command[command.index("-MaxPolls") + 1], "12")
 
+    def test_runtime_workflow_converts_legacy_direct_graph_to_current_comfyui_template(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "legacy.json"
+            source_path.write_text(json.dumps({
+                "client_id": "legacy",
+                "prompt": {
+                    "1": {
+                        "class_type": "OpenAICompatibleImageGenerate",
+                        "inputs": {
+                            "prompt": "approved panel prompt",
+                            "negative_prompt": "text, watermark",
+                            "size": "1536x1024",
+                        },
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "ComicPipeline/panels/TEST_PANEL_v001"},
+                    },
+                },
+            }), encoding="utf-8")
+            config = {
+                **server.DEFAULTS,
+                "COMIC_PIPELINE_IMAGE_BACKEND": "comfyui",
+                "COMIC_PIPELINE_COMFY_CHECKPOINT": "comic.safetensors",
+                "COMIC_PIPELINE_COMFY_STEPS": "17",
+            }
+            context = {"settings": [{"type": "character", "name": "主角", "visual_prompt": "red coat"}]}
+
+            with patch.object(server, "effective_config", return_value=config):
+                with patch.object(server, "project_manifest_dir", return_value=root / "manifests"):
+                    with patch.object(server.os, "urandom", return_value=(123).to_bytes(8, "big")):
+                        runtime_path = server.prepare_runtime_workflow(
+                            source_path,
+                            {"slug": "test"},
+                            context,
+                            "job-1",
+                            "TEST_PANEL",
+                        )
+
+            workflow = json.loads(runtime_path.read_text(encoding="utf-8"))
+            graph = workflow["prompt"]
+            self.assertEqual(graph["1"]["class_type"], "CheckpointLoaderSimple")
+            self.assertEqual(graph["1"]["inputs"]["ckpt_name"], "comic.safetensors")
+            self.assertEqual(graph["5"]["inputs"], {"width": 1536, "height": 1024, "batch_size": 1})
+            self.assertEqual(graph["9"]["inputs"]["steps"], 17)
+            self.assertEqual(graph["9"]["inputs"]["seed"], 123)
+            self.assertIn("approved panel prompt", graph["3"]["inputs"]["text"])
+            self.assertIn("[生成上下文]", graph["3"]["inputs"]["text"])
+            self.assertNotIn("OpenAICompatibleImageGenerate", {node["class_type"] for node in graph.values()})
+
+    def test_runtime_workflow_converts_local_graph_back_to_direct_api(self):
+        server = load_server_module()
+        local = server.build_local_image_workflow(
+            prompt="local panel prompt",
+            negative_prompt="bad anatomy",
+            filename_prefix="ComicPipeline/panels/TEST_PANEL_v001",
+            checkpoint="old.safetensors",
+            image_size="1024x1536",
+            seed=42,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "local.json"
+            source_path.write_text(json.dumps(local), encoding="utf-8")
+            config = {
+                **server.DEFAULTS,
+                "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+                "COMIC_PIPELINE_IMAGE_MODEL": "gpt-image-test",
+                "COMIC_PIPELINE_IMAGE_QUALITY": "high",
+            }
+
+            with patch.object(server, "effective_config", return_value=config):
+                with patch.object(server, "project_manifest_dir", return_value=root / "manifests"):
+                    runtime_path = server.prepare_runtime_workflow(
+                        source_path,
+                        {"slug": "test"},
+                        {},
+                        "job-2",
+                        "TEST_PANEL",
+                    )
+
+            workflow = json.loads(runtime_path.read_text(encoding="utf-8"))
+            graph = workflow["prompt"]
+            self.assertEqual(graph["1"]["class_type"], "OpenAICompatibleImageGenerate")
+            self.assertEqual(graph["1"]["inputs"]["prompt"], "local panel prompt")
+            self.assertEqual(graph["1"]["inputs"]["negative_prompt"], "bad anatomy")
+            self.assertEqual(graph["1"]["inputs"]["size"], "1024x1536")
+            self.assertEqual(graph["1"]["inputs"]["model"], "gpt-image-test")
+            self.assertEqual(graph["1"]["inputs"]["quality"], "high")
+
     def test_direct_image_workflow_command_rejects_empty_output_path(self):
         server = load_server_module()
         config = {"COMIC_PIPELINE_IMAGE_BACKEND": "direct_api"}

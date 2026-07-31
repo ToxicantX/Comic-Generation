@@ -117,6 +117,8 @@ powershell -ExecutionPolicy Bypass -File .\configure.ps1 `
 
 生成分镜参考图会复制到 `<ComfyUI根目录>\input\comic_pipeline`，工作流中的 `LoadImage` 使用该目录下的稳定相对路径；原始参考图路径同时写入工作流元数据，供一致性 QA 校验。生成出的 API-format workflow 会写入 `workflows/comic/`，按章节生成的文件属于运行产物，不应提交。
 
+用于连通性验收的基础 SD 1.5 checkpoint 只证明本地工作流能够加载、采样并回传图片，不代表漫画成片质量达标。生产使用应选择与目标画风匹配、能理解当前提示词语言的 checkpoint/LoRA；否则应先把中文长提示转换为模型适配的提示词，再进入人工审核。
+
 ## 可选：安装到 ComfyUI
 
 只有选择 `comfyui` 本地模型后端时才需要执行本节。`direct_api` 模式不安装节点也能完成漫画生成。

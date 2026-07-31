@@ -1119,7 +1119,7 @@ def create_asset_workflow(
             negative_prompt=negative_prompt,
             filename_prefix=filename_prefix_for_output(target_path),
             image_size=asset_image_size(category),
-            seed=0,
+            seed=random_workflow_seed(),
             control_image=control_image,
             control_source=str(reference_path or ""),
             **options,
@@ -2411,7 +2411,131 @@ def asset_usage_for_item(usage_index: dict, item: dict) -> dict:
     return {**empty_usage_summary(), **usage}
 
 
-def inject_generation_context_into_workflow(workflow_path: Path, context_snapshot: dict, job_id: str, panel_id: str = "") -> Path:
+def random_workflow_seed() -> int:
+    return int.from_bytes(os.urandom(8), "big")
+
+
+def workflow_generation_inputs(workflow: dict) -> dict:
+    graph = workflow.get("prompt") or {}
+    positive_prompt = ""
+    negative_prompt = ""
+    image_size = "1024x1536"
+    filename_prefix = ""
+    reference_source = ""
+    control_image = ""
+
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        class_type = node.get("class_type")
+        role = (node.get("_meta") or {}).get("comic_pipeline_role")
+        if class_type == "OpenAICompatibleImageGenerate":
+            positive_prompt = str(inputs.get("prompt") or positive_prompt)
+            negative_prompt = str(inputs.get("negative_prompt") or negative_prompt)
+            image_size = str(inputs.get("size") or image_size)
+            reference_source = str(inputs.get("reference_image_paths") or reference_source)
+        elif class_type == "CLIPTextEncode" and role == "positive_prompt":
+            positive_prompt = str(inputs.get("text") or positive_prompt)
+        elif class_type == "CLIPTextEncode" and role == "negative_prompt":
+            negative_prompt = str(inputs.get("text") or negative_prompt)
+        elif class_type == "EmptyLatentImage":
+            width = int(inputs.get("width") or 0)
+            height = int(inputs.get("height") or 0)
+            if width and height:
+                image_size = f"{width}x{height}"
+        elif class_type == "SaveImage":
+            filename_prefix = str(inputs.get("filename_prefix") or filename_prefix)
+        elif class_type == "LoadImage":
+            control_image = str(inputs.get("image") or control_image)
+            reference_source = str((node.get("_meta") or {}).get("comic_pipeline_reference_path") or reference_source)
+
+    if not positive_prompt.strip():
+        raise ValueError("workflow does not contain a usable image prompt")
+    if not filename_prefix.strip():
+        raise ValueError("workflow does not contain a SaveImage filename prefix")
+    return {
+        "prompt": positive_prompt,
+        "negative_prompt": negative_prompt,
+        "image_size": image_size,
+        "filename_prefix": filename_prefix,
+        "reference_source": reference_source,
+        "control_image": control_image,
+    }
+
+
+def adapt_workflow_for_backend(workflow_path: Path, project: dict, job_id: str, panel_id: str = "") -> Path:
+    source = read_optional_json(workflow_path)
+    if not isinstance(source, dict):
+        raise ValueError(f"workflow is not valid JSON: {workflow_path}")
+    values = workflow_generation_inputs(source)
+    config = effective_config(project)
+    backend = normalize_backend(config.get("COMIC_PIPELINE_IMAGE_BACKEND"))
+
+    if backend == "comfyui":
+        options = local_workflow_options(config)
+        control_image = values["control_image"]
+        reference_source = values["reference_source"].replace(";", "\n").splitlines()[0].strip() if values["reference_source"].strip() else ""
+        if options["controlnet_name"] and not control_image and reference_source:
+            control_image = copy_comfy_input_image(
+                reference_source,
+                f"runtime_{panel_id or workflow_path.stem}",
+                config.get("COMIC_PIPELINE_COMFY_ROOT") or DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"],
+            )
+        if not control_image:
+            options["controlnet_name"] = ""
+        runtime_workflow = build_local_image_workflow(
+            prompt=values["prompt"],
+            negative_prompt=values["negative_prompt"],
+            filename_prefix=values["filename_prefix"],
+            image_size=values["image_size"],
+            seed=random_workflow_seed(),
+            control_image=control_image,
+            control_source=reference_source,
+            **options,
+        )
+    else:
+        inputs = {
+            "prompt": values["prompt"],
+            "model": config.get("COMIC_PIPELINE_IMAGE_MODEL", DEFAULTS["COMIC_PIPELINE_IMAGE_MODEL"]),
+            "size": values["image_size"],
+            "quality": config.get("COMIC_PIPELINE_IMAGE_QUALITY", DEFAULTS["COMIC_PIPELINE_IMAGE_QUALITY"]),
+            "negative_prompt": values["negative_prompt"],
+            "api_key_env_path": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or str(IMAGE_ENV_PATH),
+        }
+        if values["reference_source"].strip():
+            inputs["reference_image_paths"] = values["reference_source"]
+        runtime_workflow = {
+            "client_id": "codex-comic-direct",
+            "prompt": {
+                "1": {"class_type": "OpenAICompatibleImageGenerate", "inputs": inputs},
+                "2": {
+                    "class_type": "SaveImage",
+                    "inputs": {"images": ["1", 0], "filename_prefix": values["filename_prefix"]},
+                },
+            },
+        }
+
+    runtime_workflow["comic_pipeline"] = {
+        **(source.get("comic_pipeline") if isinstance(source.get("comic_pipeline"), dict) else {}),
+        "runtime_backend": backend,
+        "source_workflow": str(workflow_path),
+    }
+    runtime_dir = project_manifest_dir(project) / "comic_runs" / "backend_workflows"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    suffix = safe_stem(panel_id or workflow_path.stem)
+    runtime_path = runtime_dir / f"{safe_stem(job_id)}_{suffix}_{backend}.json"
+    runtime_path.write_text(json.dumps(runtime_workflow, ensure_ascii=False, indent=2), encoding="utf-8")
+    return runtime_path
+
+
+def inject_generation_context_into_workflow(
+    workflow_path: Path,
+    context_snapshot: dict,
+    job_id: str,
+    panel_id: str = "",
+    project: dict | None = None,
+) -> Path:
     prompt_block = generation_context_prompt_block(context_snapshot)
     if not prompt_block:
         return workflow_path
@@ -2440,12 +2564,23 @@ def inject_generation_context_into_workflow(workflow_path: Path, context_snapsho
         changed = True
     if not changed:
         return workflow_path
-    injected_dir = project_manifest_dir() / "comic_runs" / "context_workflows"
+    injected_dir = project_manifest_dir(project) / "comic_runs" / "context_workflows"
     injected_dir.mkdir(parents=True, exist_ok=True)
     suffix = safe_stem(panel_id or workflow_path.stem)
     injected_path = injected_dir / f"{safe_stem(job_id)}_{suffix}.json"
     injected_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
     return injected_path
+
+
+def prepare_runtime_workflow(
+    workflow_path: Path,
+    project: dict,
+    context_snapshot: dict,
+    job_id: str,
+    panel_id: str = "",
+) -> Path:
+    adapted_path = adapt_workflow_for_backend(workflow_path, project, job_id, panel_id)
+    return inject_generation_context_into_workflow(adapted_path, context_snapshot, job_id, panel_id, project)
 
 
 def write_generation_context_file(context_snapshot: dict, job_id: str) -> str:
@@ -4814,7 +4949,7 @@ def start_regenerate_job(payload: dict) -> dict:
     regenerate_reason = str(payload.get("reason") or previous_metadata.get("review_comment") or "").strip()
     if regenerate_reason:
         generation_context["review_feedback"] = regenerate_reason
-    runtime_workflow_path = inject_generation_context_into_workflow(workflow_path, generation_context, job_id, panel_id)
+    runtime_workflow_path = prepare_runtime_workflow(workflow_path, project, generation_context, job_id, panel_id)
     backup_path = backup_existing_panel_image(panel_id)
     if previous_output and backup_path:
         record_previous_output_version(
@@ -5162,7 +5297,13 @@ def run_regenerate_page_job(job_id: str) -> None:
 
     for index, panel_id in enumerate(panel_ids, start=1):
         workflow_path = workflow_path_for_panel(panel_id)
-        runtime_workflow_path = inject_generation_context_into_workflow(workflow_path, job.get("generation_context") or {}, job_id, panel_id)
+        runtime_workflow_path = prepare_runtime_workflow(
+            workflow_path,
+            project,
+            job.get("generation_context") or {},
+            job_id,
+            panel_id,
+        )
         panel_result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_page_regenerate_{int(time.time())}.json"
         workflow = read_optional_json(runtime_workflow_path) or {}
         panel_target_path = panel_image_path(panel_id) or Path(expected_output_from_workflow(workflow))
