@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "漫画流水线运行时架构",
+    "quality_profile": "showcase",
+    "locale": "zh-CN",
+    "viewBox": [1380, 820],
+    "views": [
+      {
+        "id": "generation-path",
+        "label": "默认生成路径",
+        "focus": ["creator", "spa", "console-api", "task-runner", "pipeline", "image-adapter", "image-api"],
+        "note": "从浏览器发起任务，经控制台与后台流水线，默认由直连图片 API 完成生成。"
+      },
+      {
+        "id": "project-state",
+        "label": "项目状态与产物",
+        "focus": ["console-api", "task-runner", "pipeline", "postgres", "filesystem"],
+        "note": "PostgreSQL 保存结构化项目状态；项目目录保存小说、配置、工作流、日志与生成产物。"
+      },
+      {
+        "id": "model-providers",
+        "label": "模型调用",
+        "focus": ["pipeline", "text-api", "image-adapter", "image-api", "comfyui"],
+        "note": "文本与图片模型独立配置；图片适配器可在直连 API 与可选 ComfyUI 之间切换。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "creator", "type": "external", "label": "漫画创作者", "sublabel": "PC 浏览器", "pos": [30, 300], "size": [138, 68] },
+    { "id": "spa", "type": "frontend", "label": "控制台 SPA", "sublabel": "HTML / JavaScript", "pos": [200, 300], "size": [148, 68] },
+    { "id": "console-api", "type": "backend", "label": "Console API", "sublabel": "ThreadingHTTPServer :8199", "pos": [380, 300], "size": [168, 68] },
+    { "id": "task-runner", "type": "messagebus", "label": "后台任务执行器", "sublabel": "任务队列与状态推进", "pos": [580, 300], "size": [168, 68] },
+    { "id": "pipeline", "type": "backend", "label": "漫画流水线脚本", "sublabel": "拆解 / 细化 / 拼页 / QA", "pos": [780, 300], "size": [176, 68] },
+    { "id": "image-adapter", "type": "backend", "label": "图片生成适配器", "sublabel": "direct_api / comfyui", "pos": [988, 300], "size": [168, 68] },
+    { "id": "image-api", "type": "cloud", "label": "图片模型 API", "sublabel": "OpenAI-compatible", "pos": [1200, 208], "size": [148, 68] },
+    { "id": "comfyui", "type": "backend", "label": "ComfyUI", "sublabel": "可选本地图片后端", "pos": [1200, 408], "size": [148, 68] },
+    { "id": "text-api", "type": "cloud", "label": "小说处理模型 API", "sublabel": "流式 Chat Completions", "pos": [780, 92], "size": [176, 68] },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "项目 / 章节 / 任务 / 审核", "brand": "postgresql", "pos": [470, 570], "size": [184, 68] },
+    { "id": "filesystem", "type": "database", "label": "项目文件系统", "sublabel": "novels / output / logs / config", "pos": [768, 570], "size": [200, 68] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "PC / Docker Runtime", "wraps": ["spa", "console-api", "task-runner", "pipeline", "image-adapter"] },
+    { "kind": "security-group", "label": "持久化状态", "wraps": ["postgres", "filesystem"] },
+    { "kind": "region", "label": "外部模型服务", "wraps": ["text-api", "image-api"] },
+    { "kind": "security-group", "label": "可选本地生成后端", "wraps": ["comfyui"] }
+  ],
+  "connections": [
+    { "id": "creator-to-spa", "from": "creator", "to": "spa", "label": "操作与审核", "variant": "emphasis", "labelAt": [184, 382] },
+    { "id": "spa-to-api", "from": "spa", "to": "console-api", "label": "同源 /api/*", "variant": "emphasis", "labelAt": [364, 288] },
+    { "id": "api-to-runner", "from": "console-api", "to": "task-runner", "label": "创建任务", "variant": "emphasis", "labelAt": [564, 288] },
+    { "id": "runner-to-pipeline", "from": "task-runner", "to": "pipeline", "label": "执行脚本", "variant": "emphasis", "labelAt": [764, 288] },
+    { "id": "pipeline-to-adapter", "from": "pipeline", "to": "image-adapter", "label": "生成请求", "variant": "emphasis", "labelAt": [972, 288] },
+    { "id": "adapter-to-image-api", "from": "image-adapter", "to": "image-api", "label": "默认 /images", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[1178, 334], [1178, 242]], "labelAt": [1178, 294] },
+    { "id": "adapter-to-comfyui", "from": "image-adapter", "to": "comfyui", "label": "可选工作流", "variant": "dashed", "fromSide": "right", "toSide": "left", "via": [[1178, 334], [1178, 442]] },
+    { "id": "pipeline-to-text", "from": "pipeline", "to": "text-api", "label": "流式文本请求", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-to-postgres", "from": "console-api", "to": "postgres", "label": "业务状态", "fromSide": "bottom", "toSide": "top", "via": [[464, 470], [562, 470]], "labelAt": [516, 458] },
+    { "id": "pipeline-to-filesystem", "from": "pipeline", "to": "filesystem", "label": "输入与产物", "fromSide": "bottom", "toSide": "top", "labelAt": [902, 468] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "默认路径", "items": ["direct_api 是默认图片后端", "控制台与 API 由同一 :8199 服务提供"] },
+    { "dot": "amber", "title": "可选能力", "items": ["ComfyUI 仅在选择 comfyui 后端时参与", "本地工作流由模板与 custom_nodes 支撑"] },
+    { "dot": "emerald", "title": "数据边界", "items": ["API 与任务脚本共享 PostgreSQL 结构化状态", "控制台与流水线共享项目目录中的输入和产物"] }
+  ]
+}
