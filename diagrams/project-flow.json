@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "slug": "comic-generation",
+  "name": "Comic-Generation",
+  "title": "漫画生成流水线",
+  "description": "以小说为项目核心，完成内容拆解、全局设定、漫画生成、人工审核与章节迭代。",
+  "status": "开发中",
+  "repository": "https://github.com/ToxicantX/Comic-Generation",
+  "notion": "https://app.notion.com/p/Comic-Generation-39a84839dbe4812db6e8fac61d6a3c97",
+  "source": {
+    "mode": "remote",
+    "repository": "https://github.com/ToxicantX/Comic-Generation.git",
+    "ref": "main",
+    "directory": "diagrams",
+    "cover": "cover.png"
+  },
+  "updated": "2026-09-03",
+  "cover": "cover.png",
+  "flows": [
+    {
+      "id": "00",
+      "title": "运行时架构",
+      "file": "flows/00-runtime-architecture.html",
+      "spec": "flows/00-runtime-architecture.json"
+    }
+  ]
+}
