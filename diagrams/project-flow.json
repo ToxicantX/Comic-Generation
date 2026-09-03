@@ -20,6 +20,8 @@
     {
       "id": "00",
       "title": "运行时架构",
+      "sourceFile": "00-runtime-architecture.html",
+      "sourceSpec": "00-runtime-architecture.json",
       "file": "flows/00-runtime-architecture.html",
       "spec": "flows/00-runtime-architecture.json"
     }
