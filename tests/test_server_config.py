@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -800,6 +801,28 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(server.JOBS[job_id]["status"], "failed")
         self.assertEqual(server.JOBS[job_id]["exit_code"], 127)
         self.assertIn("启动失败", server.JOBS[job_id]["stderr_tail"])
+
+    def test_close_reading_refresh_rebuilds_page_plans_and_workflows(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_dir = Path(temp_dir) / "manifest"
+            manifest_dir.mkdir()
+            pipeline_result = manifest_dir / "demo_episode01_pipeline_run.json"
+            pipeline_result.write_text(json.dumps({"completed": True, "summary": {"failed": 0}}), encoding="utf-8")
+            project = {"slug": "demo", "manifest_dir": str(manifest_dir), "legacy": False}
+            completed = SimpleNamespace(returncode=0, stdout="refresh output", stderr="")
+
+            with patch.object(server, "run_job_process", return_value=completed) as run_process:
+                result = server.refresh_close_reading_artifacts(project, 1, {"COMIC_PIPELINE_WORKSPACE": "root"}, "close-job")
+
+        command = run_process.call_args.args[1]
+        self.assertTrue(result["ok"])
+        self.assertIn("--from-stage", command)
+        self.assertEqual(command[command.index("--from-stage") + 1], "page_plans")
+        self.assertEqual(command[command.index("--until-stage") + 1], "draft_qa")
+        self.assertIn("--force", command)
+        self.assertIn("--overwrite-page-plans", command)
+        self.assertIn("--skip-image-generation", command)
 
     def test_start_job_persists_project_and_retry_payload_before_launch(self):
         server = load_server_module()

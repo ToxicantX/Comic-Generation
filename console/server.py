@@ -53,6 +53,7 @@ IMAGE_PROVIDER_SCRIPT = SCRIPTS_DIR / "image_provider.py"
 ASSEMBLE_PAGE_SCRIPT = SCRIPTS_DIR / "build_comic_page_from_panels.ps1"
 PROCESS_NOVEL_SCRIPT = SCRIPTS_DIR / "process_novel.py"
 CLOSE_READING_SCRIPT = SCRIPTS_DIR / "refine_comic_episode_close_reading.py"
+EPISODE_PIPELINE_SCRIPT = SCRIPTS_DIR / "run_comic_episode_pipeline.py"
 DEFAULT_PROJECT_SLUG = "sou_shen_ji"
 GENERATED_ASSET_WORKFLOW_DIR = ROOT / "workflows" / "comic" / "generated_assets"
 MAX_NOVEL_UPLOAD_BYTES = 100 * 1024 * 1024
@@ -3714,6 +3715,49 @@ def sync_episode_breakdown_from_plan(project: dict, episode_number: int, job: di
         job=job,
     )
     return {"ok": True, "episode_number": episode_number, "breakdown": saved}
+
+
+def refresh_close_reading_artifacts(
+    project: dict,
+    episode_number: int,
+    env: dict | None,
+    job_id: str,
+) -> dict:
+    """Rebuild page plans and workflows from the plan updated by close reading."""
+    episode_plan_path = project_episode_plan_path(episode_number, project)
+    result_path = project_manifest_dir(project) / f"{project_episode_stem(project, episode_number)}_pipeline_run.json"
+    command = [
+        sys.executable,
+        str(EPISODE_PIPELINE_SCRIPT),
+        "--episode-number",
+        str(episode_number),
+        "--episode-plan",
+        str(episode_plan_path),
+        "--from-stage",
+        "page_plans",
+        "--until-stage",
+        "draft_qa",
+        "--force",
+        "--overwrite-page-plans",
+        "--skip-image-generation",
+        "--allow-draft-warnings",
+        "--run-label",
+        f"close_reading_refresh_{safe_stem(job_id)}",
+        "--result-path",
+        str(result_path),
+    ]
+    completed = run_job_process(job_id, command, env)
+    pipeline_result = read_optional_json(result_path)
+    if completed.returncode != 0 or not isinstance(pipeline_result, dict) or not pipeline_result.get("completed"):
+        detail = (pipeline_result or {}).get("summary") if isinstance(pipeline_result, dict) else ""
+        stderr = (completed.stderr or "").strip()
+        raise RuntimeError(f"细读后刷新页面计划和 workflow 失败：{detail or stderr or '未知错误'}")
+    return {
+        "ok": True,
+        "command": command,
+        "result_path": str(result_path),
+        "pipeline": pipeline_result,
+    }
 
 
 def load_agent_approvals() -> dict:
@@ -10067,6 +10111,14 @@ def _run_job(job_id: str) -> None:
     if (completed.returncode == 0 or result_completed) and job.get("stage") == "process_novel":
         sync_processed_novel_result(job, result)
     if (completed.returncode == 0 or result_completed) and job.get("stage") in {"breakdown", "draft_review", "close_reading"} and job.get("episode_number"):
+        if job.get("stage") == "close_reading":
+            artifact_refresh = refresh_close_reading_artifacts(
+                project,
+                int(job.get("episode_number") or 0),
+                env,
+                job_id,
+            )
+            result = {**(result or {}), "artifact_refresh": artifact_refresh}
         post_process = sync_episode_breakdown_from_plan(project, int(job.get("episode_number") or 0), job)
         if job.get("stage") == "close_reading":
             episode_number = int(job.get("episode_number") or 0)
