@@ -5,49 +5,61 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>漫画流水线控制台</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260711-project-backup-v1">
+  <link rel="stylesheet" href="/static/obsidian.css?v=20260901-contrast-v3">
 </head>
 <body>
   <main class="shell">
     <aside class="app-rail" aria-label="控制台导航">
       <div class="rail-brand">
-        <p>COMIC PIPELINE</p>
-        <h1>漫画生产控制台</h1>
+        <span class="brand-mark" aria-hidden="true">漫</span>
+        <div>
+          <h1>漫画流水线</h1>
+          <p>Comic Pipeline</p>
+        </div>
       </div>
 
-      <section class="rail-project" aria-label="当前小说作品">
-        <p>当前小说</p>
-        <h2 id="projectMetric">读取中</h2>
-        <select id="projectSelect" class="filter-select"></select>
-        <button id="importWizardButton" class="primary" type="button" title="打开导入小说向导">导入向导</button>
-      </section>
+      <button id="importWizardButton" class="rail-create primary" type="button" title="导入新的小说项目"><span aria-hidden="true">＋</span> 导入小说</button>
 
       <nav class="module-switch" aria-label="控制台模块">
         <div class="module-group">
-          <p class="module-group-label">漫画流程</p>
-          <button data-module="home" class="active" type="button"><span>01</span>首页</button>
-          <button data-module="importNovel" type="button"><span>02</span>导入小说</button>
-          <button data-module="settingsLibrary" type="button"><span>03</span>小说设定库</button>
-          <button data-module="assets" type="button"><span>04</span>全局素材库</button>
-          <button data-module="workflow" type="button"><span>05</span>章节工作台</button>
-          <button data-module="reviewCenter" type="button"><span>06</span>审核中心</button>
+          <p class="module-group-label">项目工作台</p>
+          <button data-module="home" class="active" type="button"><span aria-hidden="true">⌂</span>控制台</button>
+          <button data-module="workflow" data-workspace-tab="content" type="button"><span aria-hidden="true">▤</span>小说内容</button>
+          <button data-module="settingsLibrary" type="button"><span aria-hidden="true">◫</span>小说设定</button>
+          <button data-module="assets" type="button"><span aria-hidden="true">◇</span>素材库</button>
+          <button data-module="workflow" data-workspace-tab="media" type="button"><span aria-hidden="true">▧</span>漫画制作</button>
         </div>
         <div class="module-group module-group-utility">
-          <p class="module-group-label">系统工具</p>
-          <button data-module="taskCenter" type="button"><span>•</span>任务中心</button>
+          <button data-module="taskCenter" type="button"><span aria-hidden="true">◎</span>任务中心</button>
           <button data-module="settings" type="button"><span>⚙</span>设置</button>
         </div>
       </nav>
-
-      <section class="system-strip" aria-label="系统状态">
-        <div><span>生成后端</span><strong id="comfyMetric">-</strong></div>
-        <div><span>接口密钥</span><strong id="keyMetric">-</strong></div>
-        <div><span>输出进度</span><strong id="episodeMetric">-</strong></div>
-        <div><span>最新任务</span><strong id="jobMetric">-</strong></div>
-        <button id="refreshButton" type="button">刷新状态</button>
-      </section>
     </aside>
 
     <section class="workspace-frame">
+    <header class="topbar">
+      <div class="topbar-project">
+        <span>当前小说</span>
+        <strong id="projectMetric">读取中</strong>
+        <select id="projectSelect" class="filter-select" aria-label="切换当前小说"></select>
+      </div>
+      <label class="topbar-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="globalSearch" type="search" placeholder="搜索当前工作区" autocomplete="off">
+      </label>
+      <div class="topbar-actions">
+        <span class="backend-state" title="当前生成后端"><i aria-hidden="true"></i><strong id="comfyMetric">读取中</strong></span>
+        <button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态"><span aria-hidden="true">↻</span></button>
+        <button id="topReviewButton" class="icon-button" type="button" title="打开审核中心" aria-label="打开审核中心"><span aria-hidden="true">✓</span></button>
+        <button id="topTaskButton" class="icon-button" type="button" title="打开任务中心" aria-label="打开任务中心"><span aria-hidden="true">◎</span></button>
+        <button id="topSettingsButton" class="icon-button" type="button" title="打开设置" aria-label="打开设置"><span aria-hidden="true">⚙</span></button>
+      </div>
+      <div class="visually-hidden" aria-hidden="true">
+        <strong id="keyMetric">-</strong>
+        <strong id="episodeMetric">-</strong>
+        <strong id="jobMetric">-</strong>
+      </div>
+    </header>
 
     <section class="home-workspace module-view active" data-module-view="home">
       <section class="home-pane">
@@ -122,7 +134,7 @@
             <small>选择小说文件、确认项目信息，然后写入 PostgreSQL；这里复用现有上传和处理接口，不新增重复导入流程。</small>
           </div>
           <div class="hero-actions">
-            <span id="importWizardBadge" class="mini-badge">三步导入</span>
+            <span id="importWizardBadge" class="mini-badge">四步导入</span>
           </div>
         </section>
 
@@ -323,7 +335,7 @@
       </section>
     </section>
 
-    <section class="workbench module-view" data-module-view="workflow">
+    <section class="workbench module-view" data-module-view="workflow" data-workspace="novel">
     <aside class="sidebar">
       <div class="side-head">
         <div>
@@ -347,7 +359,7 @@
       <section class="hero-panel">
         <div>
           <p id="statusLine">读取中</p>
-          <h2>小说详情</h2>
+          <h2 id="workspaceTitle">小说内容</h2>
           <small id="contextLine">章节由左侧列表选择，当前视图跟随所选章节刷新。</small>
         </div>
         <div class="hero-actions">
@@ -818,7 +830,7 @@
               </div>
               <span id="settingsDatabaseBadge" class="mini-badge">待检查</span>
             </div>
-            <label>PostgreSQL 地址<input id="databaseUrl" autocomplete="off"></label>
+            <label>PostgreSQL 地址<input id="databaseUrl" type="password" autocomplete="off"></label>
             <small id="databaseDetail" class="settings-note">作品、章节、审核状态和任务索引使用 PostgreSQL 保存。</small>
           </section>
 
@@ -856,6 +868,6 @@
     </section>
   </div>
 
-  <script src="/static/app.js?v=20260711-project-backup-v1"></script>
+  <script src="/static/app.js?v=20260901-stitch-v1"></script>
 </body>
 </html>

@@ -131,19 +131,18 @@ def build_chapter_index(lines: list[str], title: str) -> list[dict]:
 
 
 def fallback_chapter_index(lines: list[str], title: str) -> list[dict]:
-    body_lines = [line for line in lines if line.strip()]
+    body_lines = [(number, line) for number, line in enumerate(lines, start=1) if line.strip()]
     chunk_size = max(1, len(body_lines) // 12)
     entries = [{"type": "volume", "title": title, "line": 1}]
-    source_line = 1
     chapter_number = 1
     for index in range(0, len(body_lines), chunk_size):
         entries.append({
             "type": "chapter",
             "volume": title,
             "title": f"第{chapter_number}章",
-            "line": source_line,
+            "line": body_lines[index][0],
+            "fallback": True,
         })
-        source_line += chunk_size
         chapter_number += 1
         if chapter_number > 12:
             break
@@ -155,7 +154,8 @@ def attach_chapter_excerpts(chapter_index: list[dict], lines: list[str], max_cha
     for index, chapter in enumerate(chapters):
         start_line = max(int(chapter.get("line") or 1), 1)
         next_line = int(chapters[index + 1].get("line") or len(lines) + 1) if index + 1 < len(chapters) else len(lines) + 1
-        body = "\n".join(line.strip() for line in lines[start_line: max(start_line, next_line - 1)] if line.strip())
+        start_index = start_line - 1 if chapter.get("fallback") else start_line
+        body = "\n".join(line.strip() for line in lines[start_index: max(start_index, next_line - 1)] if line.strip())
         excerpt = body[:max_chars].strip()
         if excerpt:
             chapter["excerpt"] = excerpt

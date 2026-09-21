@@ -1,6 +1,7 @@
 import argparse
 import base64
 import hashlib
+import hmac
 import io
 import json
 import mimetypes
@@ -14,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -59,6 +61,11 @@ MAX_BACKUP_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_BACKUP_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_BACKUP_FILES = 20000
 ALLOWED_NOVEL_EXTENSIONS = {".txt", ".md", ".text", ".novel"}
+CONSOLE_PROTECTED_CONFIG_KEYS = {
+    "COMIC_PIPELINE_TEXT_ENV_PATH",
+    "COMIC_PIPELINE_IMAGE_ENV_PATH",
+    "COMIC_PIPELINE_PYTHON_PATH",
+}
 
 PIPELINE_KEYS = [
     "COMIC_PIPELINE_WORKSPACE",
@@ -240,6 +247,27 @@ def runtime_config() -> dict:
         if key in os.environ:
             config[key] = os.environ[key]
     return config
+
+
+def console_auth_token() -> str:
+    return str(os.environ.get("COMIC_PIPELINE_CONSOLE_TOKEN") or "").strip()
+
+
+def console_authorization_valid(header_value: str) -> bool:
+    token = console_auth_token()
+    if not token:
+        return True
+    scheme, _, credentials = str(header_value or "").partition(" ")
+    if scheme.lower() == "bearer":
+        return hmac.compare_digest(credentials.strip(), token)
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(credentials.strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    username, separator, password = decoded.partition(":")
+    return bool(separator) and username == "comic" and hmac.compare_digest(password, token)
 
 
 def validate_local_template_config(config: dict) -> None:
@@ -521,6 +549,9 @@ def config_snapshot() -> dict:
 def save_config(payload: dict) -> dict:
     current = config_snapshot()["config"]
     incoming = payload.get("config") or {}
+    for key in CONSOLE_PROTECTED_CONFIG_KEYS:
+        if key in incoming and str(incoming[key]).strip() != str(current.get(key) or "").strip():
+            raise ValueError(f"{key} 只能由部署配置修改，不能通过控制台变更")
     if "COMIC_PIPELINE_IMAGE_BACKEND" in incoming:
         incoming = dict(incoming)
         incoming["COMIC_PIPELINE_IMAGE_BACKEND"] = normalize_backend(incoming["COMIC_PIPELINE_IMAGE_BACKEND"])
@@ -918,6 +949,10 @@ def comfy_view_url(path: str | Path) -> str:
 def safe_stem(value: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9_]+", "_", value or "").strip("_").lower()
     return stem or "asset"
+
+
+def new_job_id(label: str) -> str:
+    return f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:10]}-{safe_stem(label)}"
 
 
 def find_latest_output(prefix: str, folder: Path) -> Path | None:
@@ -1915,7 +1950,7 @@ def generated_output_review_blockers_from_rows(rows: list[dict], ignored_page_id
     ignored = str(ignored_page_id or "").upper()
     pending_rows = [
         row for row in rows
-        if row.get("review_status") in {"draft", "pending_review", "needs_work"}
+        if row.get("review_status") in {"draft", "pending_review", "needs_work", "rejected"}
         and (not ignored or output_page_id(row).upper() != ignored)
     ]
     by_page: dict[str, int] = {}
@@ -3774,6 +3809,8 @@ def sync_gate_side_effects(episode_number: int, gate: str, approved: bool) -> No
     rows = db.list_generated_outputs(database_url(), project["slug"], episode_number)
     target_status = "approved" if approved else "pending_review"
     for row in rows:
+        if row.get("review_status") in {"rejected", "needs_work"}:
+            continue
         if row.get("review_status") == target_status:
             continue
         saved = db.update_generated_output(database_url(), int(row["id"]), {
@@ -4075,7 +4112,7 @@ def assert_stage_allowed(stage: str, episode_number: int) -> None:
         project = active_project()
         if not project_episode_plan_path(episode_number, project).is_file():
             raise ValueError("请先执行智能拆解，生成章节页面计划后再进行细读拆解。")
-        config = config_snapshot()["config"]
+        config = effective_config(project)
         if not config.get("COMIC_PIPELINE_TEXT_MODEL"):
             raise ValueError("请先在设置中配置小说处理模型。")
         readiness = global_asset_readiness(project)
@@ -4471,7 +4508,7 @@ def backup_existing_panel_image(panel_id: str) -> str:
         return ""
     backup_dir = path.parent / "_regenerate_backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"{path.stem}_backup_{int(time.time())}{path.suffix}"
+    backup_path = backup_dir / f"{path.stem}_backup_{time.time_ns()}{path.suffix}"
     shutil.move(str(path), str(backup_path))
     return str(backup_path)
 
@@ -4482,7 +4519,7 @@ def backup_existing_file(path: str | Path, label: str) -> str:
         return ""
     backup_dir = candidate.parent / "_regenerate_backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"{candidate.stem}_{safe_stem(label)}_backup_{int(time.time())}{candidate.suffix}"
+    backup_path = backup_dir / f"{candidate.stem}_{safe_stem(label)}_backup_{time.time_ns()}{candidate.suffix}"
     shutil.move(str(candidate), str(backup_path))
     return str(backup_path)
 
@@ -4492,26 +4529,38 @@ def restore_asset_backup(job: dict) -> str:
         return ""
     backup = Path(str(job.get("backup_path") or ""))
     target = Path(str(job.get("asset_path") or ""))
-    if not backup.is_file() or not str(target):
+    if not backup.is_file() or not str(job.get("asset_path") or ""):
         return ""
-    if not target.is_file():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup, target)
     return str(target)
 
 
 def restore_job_backup(job: dict) -> str:
     if job.get("stage") == "asset_regenerate":
         return restore_asset_backup(job)
+    if job.get("stage") == "regenerate_page":
+        restored = []
+        backup_paths = job.get("backup_paths") if isinstance(job.get("backup_paths"), dict) else {}
+        panel_paths = job.get("panel_paths") if isinstance(job.get("panel_paths"), dict) else {}
+        for panel_id, backup_value in backup_paths.items():
+            backup = Path(str(backup_value or ""))
+            target_value = str(panel_paths.get(panel_id) or "").strip()
+            target = Path(target_value)
+            if not backup.is_file() or not target_value:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, target)
+            restored.append(str(target))
+        return ", ".join(restored)
     if job.get("stage") != "regenerate":
         return ""
     backup = Path(str(job.get("backup_path") or ""))
     target = Path(str(job.get("panel_path") or ""))
-    if not backup.is_file() or not str(job.get("panel_path") or ""):
+    if not backup.is_file() or not str(job.get("panel_path") or "").strip():
         return ""
-    if not target.is_file():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup, target)
     return str(target)
 
 
@@ -4686,8 +4735,8 @@ def start_asset_regenerate_job(payload: dict) -> dict:
         })
         raise
 
-    job_id = f"{int(time.time() * 1000)}-{asset_id or safe_stem(alias)}-asset-regenerate"
-    result_path = project_manifest_dir(project) / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{int(time.time())}.json"
+    job_id = new_job_id(f"{asset_id or safe_stem(alias)}-asset-regenerate")
+    result_path = project_manifest_dir(project) / "anchor_runs" / f"{safe_stem(alias)}_console_regenerate_{safe_stem(job_id)}.json"
     image_backend, cmd = image_workflow_command(
         project,
         workflow_path,
@@ -4766,7 +4815,7 @@ def start_asset_batch_job(payload: dict) -> dict:
         assets.append(asset)
 
     episode_number = int(payload.get("episode_number") or 1)
-    job_id = f"{int(time.time() * 1000)}-asset-batch"
+    job_id = new_job_id("asset-batch")
     job = {
         "id": job_id,
         "stage": "asset_batch",
@@ -4803,6 +4852,13 @@ def start_asset_batch_job(payload: dict) -> dict:
 
 
 def run_asset_batch_job(job_id: str) -> None:
+    try:
+        _run_asset_batch_job(job_id)
+    except Exception as exc:
+        fail_background_job(job_id, exc, "asset_batch_failed")
+
+
+def _run_asset_batch_job(job_id: str) -> None:
     with JOB_LOCK:
         parent = dict(JOBS[job_id])
     project = project_by_slug(parent.get("project_slug", ""))
@@ -4938,8 +4994,8 @@ def start_regenerate_job(payload: dict) -> dict:
     if not workflow_path:
         raise ValueError(f"workflow not found for panel: {panel_id}")
 
-    job_id = f"{int(time.time())}-regenerate"
-    result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_console_regenerate_{int(time.time())}.json"
+    job_id = new_job_id("regenerate")
+    result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_console_regenerate_{safe_stem(job_id)}.json"
     project = active_project()
     generation_context = build_generation_context_snapshot(project, episode_number, page_id, [panel_id])
     workflow = read_optional_json(workflow_path) or {}
@@ -5035,17 +5091,19 @@ def start_regenerate_page_job(payload: dict) -> dict:
         raise ValueError("当前页没有缺失分镜")
     workflow_entries = {str(item.get("panel_id") or ""): item for item in workflow_entries_for_page(page_id)}
     missing_workflows = []
+    workflow_paths = {}
     for panel in targets:
         panel_id = str(panel.get("panel_id") or "")
         workflow_path = workflow_path_for_panel(panel_id) or Path(str(workflow_entries.get(panel_id, {}).get("workflow") or ""))
         if not workflow_path or not workflow_path.is_file():
             missing_workflows.append(panel_id)
+        else:
+            workflow_paths[panel_id] = str(workflow_path)
     if missing_workflows:
         raise ValueError("缺少分镜工作流: " + ", ".join(missing_workflows))
 
-    now = int(time.time())
-    job_id = f"{now}-regenerate-page"
-    result_path = project_manifest_dir() / "comic_runs" / f"{page_id.lower()}_console_regenerate_page_{now}.json"
+    job_id = new_job_id("regenerate-page")
+    result_path = project_manifest_dir() / "comic_runs" / f"{page_id.lower()}_console_regenerate_page_{safe_stem(job_id)}.json"
     panel_ids = [str(item.get("panel_id") or "") for item in targets]
     generation_context = build_generation_context_snapshot(project, episode_number, page_id, panel_ids)
     job = {
@@ -5056,6 +5114,9 @@ def start_regenerate_page_job(payload: dict) -> dict:
         "episode_number": episode_number,
         "page_id": page_id,
         "panel_ids": panel_ids,
+        "workflow_paths": workflow_paths,
+        "backup_paths": {},
+        "panel_paths": {},
         "generation_context": generation_context,
         "status": "running",
         "started": datetime.now().isoformat(timespec="seconds"),
@@ -5084,6 +5145,67 @@ def start_regenerate_page_job(payload: dict) -> dict:
 def was_job_cancelled(job_id: str) -> bool:
     with JOB_LOCK:
         return str(JOBS.get(job_id, {}).get("status") or "") == "cancelled"
+
+
+def fail_background_job(job_id: str, exc: Exception, error_type: str) -> None:
+    with JOB_LOCK:
+        current = dict(JOBS.get(job_id) or {})
+    if not current or current.get("status") == "cancelled":
+        return
+
+    restored_output_path = ""
+    restore_warning = ""
+    try:
+        restored_output_path = restore_job_backup(current)
+    except Exception as restore_exc:
+        restore_warning = str(restore_exc)
+
+    message = f"后台任务异常：{type(exc).__name__}: {exc}"
+    with JOB_LOCK:
+        live = JOBS.get(job_id)
+        if not live or live.get("status") == "cancelled":
+            return
+        previous_stderr = str(live.get("stderr_tail") or "").strip()
+        try:
+            exit_code = int(live.get("exit_code")) if live.get("exit_code") is not None else 1
+        except (TypeError, ValueError):
+            exit_code = 1
+        live.update({
+            "status": "failed",
+            "finished": datetime.now().isoformat(timespec="seconds"),
+            "exit_code": exit_code,
+            "stderr_tail": "\n".join(item for item in (previous_stderr, message) if item),
+            "result": {
+                "ok": False,
+                "error": str(exc),
+                "error_type": error_type,
+            },
+            "diagnostics": {
+                "domain": "background_job",
+                "title": "后台任务执行异常",
+                "issues": [{
+                    "type": error_type,
+                    "severity": "error",
+                    "message": message,
+                    "action": "查看任务详情和服务日志，修复原因后重试。",
+                    "retry_hint": "可重试",
+                }],
+            },
+            "progress": job_progress_state(failed=1, current="后台任务执行异常"),
+        })
+        if restored_output_path:
+            live["restored_output_path"] = restored_output_path
+        if restore_warning:
+            live["restore_warning"] = restore_warning
+        snapshot = dict(live)
+
+    try:
+        db.save_job(database_url(), snapshot.get("project_slug") or active_project_slug(), snapshot)
+    except Exception as db_exc:
+        with JOB_LOCK:
+            live = JOBS.get(job_id)
+            if live:
+                live["database_warning"] = str(db_exc)
 
 
 def run_job_process(job_id: str, command: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -5256,14 +5378,21 @@ def retry_job_api(job_id: str) -> dict:
 
 
 def run_regenerate_page_job(job_id: str) -> None:
+    try:
+        _run_regenerate_page_job(job_id)
+    except Exception as exc:
+        fail_background_job(job_id, exc, "regenerate_page_failed")
+
+
+def _run_regenerate_page_job(job_id: str) -> None:
     with JOB_LOCK:
         job = dict(JOBS[job_id])
     project = project_by_slug(job.get("project_slug", ""))
-    config = runtime_config()
+    config = effective_config(project)
     env = os.environ.copy()
     env.update({
         "COMIC_PIPELINE_WORKSPACE": str(ROOT),
-        "COMIC_PIPELINE_MANIFEST_DIR": str(project_manifest_dir()),
+        "COMIC_PIPELINE_MANIFEST_DIR": str(project_manifest_dir(project)),
         "COMIC_PIPELINE_COMFY_ROOT": config.get("COMIC_PIPELINE_COMFY_ROOT", ""),
         "COMIC_PIPELINE_COMFY_URL": config.get("COMIC_PIPELINE_COMFY_URL", ""),
         "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": config.get("COMIC_PIPELINE_COMFY_OUTPUT_ROOT", ""),
@@ -5296,7 +5425,9 @@ def run_regenerate_page_job(job_id: str) -> None:
     result_path.parent.mkdir(parents=True, exist_ok=True)
 
     for index, panel_id in enumerate(panel_ids, start=1):
-        workflow_path = workflow_path_for_panel(panel_id)
+        workflow_path = Path(str((job.get("workflow_paths") or {}).get(panel_id) or ""))
+        if not workflow_path.is_file():
+            raise ValueError(f"workflow not found for panel: {panel_id}")
         runtime_workflow_path = prepare_runtime_workflow(
             workflow_path,
             project,
@@ -5304,13 +5435,19 @@ def run_regenerate_page_job(job_id: str) -> None:
             job_id,
             panel_id,
         )
-        panel_result_path = project_manifest_dir() / "comic_runs" / f"{panel_id.lower()}_page_regenerate_{int(time.time())}.json"
+        panel_result_path = project_manifest_dir(project) / "comic_runs" / f"{panel_id.lower()}_page_regenerate_{safe_stem(job_id)}.json"
         workflow = read_optional_json(runtime_workflow_path) or {}
         panel_target_path = panel_image_path(panel_id) or Path(expected_output_from_workflow(workflow))
         backup_path = ""
         previous_output = db.get_generated_output_by_path(database_url(), project["slug"], str(panel_image_path(panel_id) or ""))
         if panel_image_path(panel_id):
             backup_path = backup_existing_panel_image(panel_id)
+        with JOB_LOCK:
+            live = JOBS.get(job_id)
+            if live is not None:
+                if backup_path:
+                    live.setdefault("backup_paths", {})[panel_id] = backup_path
+                live.setdefault("panel_paths", {})[panel_id] = str(panel_target_path)
         if previous_output and backup_path:
             record_previous_output_version(
                 project,
@@ -8434,6 +8571,13 @@ def scan_settings_preview_api(slug: str, query: dict | None = None) -> dict:
 
 
 def run_inline_job(job_id: str, worker) -> None:
+    try:
+        _run_inline_job(job_id, worker)
+    except Exception as exc:
+        fail_background_job(job_id, exc, "inline_job_failed")
+
+
+def _run_inline_job(job_id: str, worker) -> None:
     with JOB_LOCK:
         live = JOBS.get(job_id)
         if live:
@@ -8497,7 +8641,7 @@ def start_setting_scan_job(slug: str, payload: dict) -> dict:
         raise ValueError("全书扫描需要二次确认。请先预览影响范围，再确认启动。")
     limit = int(payload.get("limit") or 80)
     extraction_mode = setting_scan_extraction_mode(payload.get("extraction_mode"))
-    job_id = f"{int(time.time())}-setting-scan"
+    job_id = new_job_id("setting-scan")
     job = {
         "id": job_id,
         "stage": "setting_scan",
@@ -9574,7 +9718,7 @@ def start_process_novel_job(payload: dict) -> dict:
     current["COMIC_PIPELINE_NOVEL_PATH"] = str(novel)
     write_env(CONFIG_PATH, current, PIPELINE_KEYS)
 
-    job_id = f"{int(time.time())}-process-novel"
+    job_id = new_job_id("process-novel")
     result_path = project_dir / f"{slug}_novel_process_result.json"
     cmd = [
         "python",
@@ -9661,8 +9805,8 @@ def start_job(payload: dict) -> dict:
     if stage == "close_reading":
         hydrate_episode_plan_source_excerpts(project, episode_number, episode_plan_path)
 
-    job_id = f"{int(time.time())}-{stage}"
-    result_path = project_manifest_dir(project) / f"console_{stage}_episode{episode_number:02d}_{int(time.time())}.json"
+    job_id = new_job_id(stage)
+    result_path = project_manifest_dir(project) / f"console_{stage}_episode{episode_number:02d}_{safe_stem(job_id)}.json"
     generation_context = build_generation_context_snapshot(project, episode_number) if stage in {"generate", "close_reading"} else {}
     if stage == "close_reading":
         generation_context = add_close_reading_protection_context(project, episode_number, generation_context)
@@ -9758,6 +9902,13 @@ def start_job(payload: dict) -> dict:
 
 
 def run_job(job_id: str) -> None:
+    try:
+        _run_job(job_id)
+    except Exception as exc:
+        fail_background_job(job_id, exc, "background_job_failed")
+
+
+def _run_job(job_id: str) -> None:
     with JOB_LOCK:
         job = dict(JOBS[job_id])
     env = os.environ.copy()
@@ -10167,6 +10318,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ComicPipelineConsole/0.1"
 
     def do_GET(self):
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self.serve_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
@@ -10254,6 +10407,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.not_found()
 
     def do_POST(self):
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         try:
             payload = self.read_json_body()
@@ -10346,6 +10501,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.not_found()
 
     def do_PATCH(self):
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         try:
             payload = self.read_json_body()
@@ -10371,6 +10528,19 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8-sig"))
+
+    def require_authorization(self) -> bool:
+        if console_authorization_valid(self.headers.get("Authorization", "")):
+            return True
+        data = json.dumps({"error": "authentication_required"}, ensure_ascii=False).encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Comic Pipeline", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return False
 
     def serve_static(self, rel: str):
         target = (STATIC_DIR / rel).resolve()

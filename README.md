@@ -135,6 +135,17 @@ powershell -ExecutionPolicy Bypass -File .\install_to_comfyui.ps1 -Force -Disabl
 
 日常使用不需要进入 ComfyUI 节点图。配置、审核、运行和结果查看都从漫画流水线控制台操作；生成时由设置中选择的图片后端执行。
 
+### 控制台鉴权（可选）
+
+如果控制台通过局域网、反向代理或公网访问，建议在启动进程环境中设置 `COMIC_PIPELINE_CONSOLE_TOKEN`。服务端接受 `Bearer <token>`，浏览器直接访问时也支持用户名 `comic`、密码为该 Token 的 Basic Auth；不设置时保持本机开发模式的无鉴权行为。
+
+```powershell
+$env:COMIC_PIPELINE_CONSOLE_TOKEN = "替换为高强度随机值"
+powershell -ExecutionPolicy Bypass -File .\start_console.ps1
+```
+
+Docker Compose 中不要把 Token 写入仓库文件；在启动 Compose 的宿主机环境中设置同名变量，并通过部署平台的 secret 注入。Token 不属于控制台可编辑配置，也不会写入 PostgreSQL、任务记录或运行 workflow。
+
 后续控制台界面、漫画预览和页面拼版必须遵循 `docs/design-guidelines.md`。当前固化方向是视觉紧凑、黑色 gutter、横向大格边缘对齐、无粗边框、无大留白。
 
 ### Docker Compose 启动（推荐）

@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import hashlib
 import io
 import json
@@ -406,6 +407,51 @@ class RuntimeConfigTest(unittest.TestCase):
                     })
 
         write_env.assert_not_called()
+
+    def test_console_authorization_accepts_bearer_and_basic_tokens(self):
+        server = load_server_module()
+        token = "console-test-token"
+        basic = base64.b64encode(f"comic:{token}".encode("utf-8")).decode("ascii")
+
+        with patch.dict(os.environ, {"COMIC_PIPELINE_CONSOLE_TOKEN": token}, clear=False):
+            self.assertTrue(server.console_authorization_valid(f"Bearer {token}"))
+            self.assertTrue(server.console_authorization_valid(f"Basic {basic}"))
+            self.assertFalse(server.console_authorization_valid("Bearer wrong-token"))
+            self.assertFalse(server.console_authorization_valid("Basic invalid"))
+
+        with patch.dict(os.environ, {"COMIC_PIPELINE_CONSOLE_TOKEN": ""}, clear=False):
+            self.assertTrue(server.console_authorization_valid(""))
+
+    def test_failed_page_regeneration_restores_all_backed_up_panels(self):
+        server = load_server_module()
+        server.JOBS.clear()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_one = root / "backup-one.png"
+            backup_two = root / "backup-two.png"
+            target_one = root / "panel-one.png"
+            target_two = root / "panel-two.png"
+            backup_one.write_bytes(b"one")
+            backup_two.write_bytes(b"two")
+            target_one.write_bytes(b"partial-output")
+            target_two.write_bytes(b"partial-output")
+            server.JOBS["page-job"] = {
+                "id": "page-job",
+                "stage": "regenerate_page",
+                "status": "running",
+                "project_slug": "demo",
+                "backup_paths": {"PANEL01": str(backup_one), "PANEL02": str(backup_two)},
+                "panel_paths": {"PANEL01": str(target_one), "PANEL02": str(target_two)},
+                "progress": {"total": 2, "completed": 1, "failed": 0},
+            }
+
+            with patch.object(server.db, "save_job"):
+                server.fail_background_job("page-job", RuntimeError("worker failed"), "regenerate_page_failed")
+
+            self.assertEqual(target_one.read_bytes(), b"one")
+            self.assertEqual(target_two.read_bytes(), b"two")
+            self.assertEqual(server.JOBS["page-job"]["status"], "failed")
+            self.assertIn(str(target_one), server.JOBS["page-job"]["restored_output_path"])
 
     def test_episode_skeleton_uses_planned_panel_count(self):
         server = load_server_module()

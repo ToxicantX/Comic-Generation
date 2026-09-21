@@ -2128,7 +2128,7 @@ function renderProjects() {
   }
   const active = state.projects.find((item) => item.slug === state.activeProject) || state.projects[0];
   if (active) {
-    $("projectMetric").textContent = `${active.title || active.slug} · ${Number(active.chapters || 0)} 章 · ${Number(active.episodes || 0)} 个流程`;
+    $("projectMetric").textContent = `${Number(active.chapters || 0)} 章 · ${Number(active.episodes || 0)} 个流程`;
     setValue("projectTitle", active.title || "");
     setValue("projectSlug", active.slug || "");
     setValue("novelPath", active.novel_path || $("novelPath").value);
@@ -5182,14 +5182,48 @@ async function regenerateAsset(asset) {
   }
 }
 
-async function switchModule(module) {
-  state.activeModule = module;
+function workflowNavigationTab() {
+  return state.activeTab === "media" ? "media" : "content";
+}
+
+function syncModuleNavigation() {
+  const workflowTab = workflowNavigationTab();
   document.querySelectorAll("[data-module]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.module === module);
+    const isWorkflowRoute = button.dataset.module === "workflow";
+    const routeMatches = !isWorkflowRoute || (button.dataset.workspaceTab || "content") === workflowTab;
+    button.classList.toggle("active", button.dataset.module === state.activeModule && routeMatches);
   });
+}
+
+function currentWorkspaceSearch() {
+  return {
+    workflow: "episodeSearch",
+    settingsLibrary: "settingSearch",
+    assets: "assetSearch",
+  }[state.activeModule] || "";
+}
+
+function updateGlobalSearch() {
+  const input = $("globalSearch");
+  if (!input) return;
+  const target = $(currentWorkspaceSearch());
+  input.disabled = !target;
+  input.placeholder = target?.placeholder || "当前页面无需搜索";
+  input.value = target?.value || "";
+}
+
+async function switchModule(module, workspaceTab = "") {
+  state.activeModule = module;
   document.querySelectorAll("[data-module-view]").forEach((view) => {
     view.classList.toggle("active", view.dataset.moduleView === module);
   });
+  if (module === "workflow") {
+    if (workspaceTab === "media") switchTab("media");
+    else if (workspaceTab === "content" && state.activeTab === "media") switchTab("source");
+    else if (!state.activeTab) switchTab("source");
+  }
+  syncModuleNavigation();
+  updateGlobalSearch();
   if (module === "home") renderHome();
   if (module === "workflow") {
     const targetEpisode = mainEpisodeFromDashboard();
@@ -5197,7 +5231,6 @@ async function switchModule(module) {
       await loadEpisode(targetEpisode);
     }
     renderReader();
-    if (!state.activeTab) switchTab("source");
     document.querySelector(".main-pane")?.scrollTo({ top: 0, left: 0 });
   }
   if (module === "settingsLibrary") loadSettingsLibrary().catch((error) => window.alert(error.message || "设定库加载失败"));
@@ -5218,6 +5251,8 @@ async function switchModule(module) {
     }
   }
   if (module === "settings") updateSettingsBadges();
+  syncModuleNavigation();
+  updateGlobalSearch();
 }
 
 function settingsSourceRows() {
@@ -5551,6 +5586,12 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-view").forEach((view) => {
     view.classList.toggle("active", view.id === `tab-${tab}`);
   });
+  const workbench = document.querySelector(".workbench");
+  if (workbench) workbench.dataset.workspace = tab === "media" ? "comic" : "novel";
+  const title = $("workspaceTitle");
+  if (title) title.textContent = tab === "media" ? "漫画制作" : "小说内容";
+  if (tab === "media") renderMedia();
+  syncModuleNavigation();
 }
 
 function setButtons(disabled) {
@@ -5736,6 +5777,15 @@ function escapeHtml(value) {
 
 document.addEventListener("DOMContentLoaded", () => {
   $("refreshButton").addEventListener("click", loadAll);
+  $("topReviewButton")?.addEventListener("click", () => switchModule("reviewCenter"));
+  $("topTaskButton")?.addEventListener("click", () => switchModule("taskCenter"));
+  $("topSettingsButton")?.addEventListener("click", () => switchModule("settings"));
+  $("globalSearch")?.addEventListener("input", (event) => {
+    const target = $(currentWorkspaceSearch());
+    if (!target) return;
+    target.value = event.target.value;
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  });
   $("homeImportButton").addEventListener("click", () => switchModule("importNovel"));
   $("importWizardButton").addEventListener("click", () => switchModule("importNovel"));
   $("importOpenSettingsButton").addEventListener("click", () => switchModule("settings"));
@@ -5858,7 +5908,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("settingNeedsWorkButton").addEventListener("click", () => reviewSetting("needs_work"));
   $("settingLockButton").addEventListener("click", toggleSettingLock);
   document.querySelectorAll("[data-module]").forEach((button) => {
-    button.addEventListener("click", () => switchModule(button.dataset.module));
+    button.addEventListener("click", () => switchModule(button.dataset.module, button.dataset.workspaceTab || ""));
   });
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
