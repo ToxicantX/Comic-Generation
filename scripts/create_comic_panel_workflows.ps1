@@ -105,7 +105,12 @@ foreach ($panel in $plan.panels) {
     } else {
         [string]$panel.filename_prefix
     }
-    $expectedImagePath = Join-Path $comicConfig.ComfyOutputRoot "$($filenamePrefix)_00001_.png"
+    $expectedImagePath = if ($isLocalBackend) {
+        Join-Path $comicConfig.ComfyOutputRoot "$($filenamePrefix)_00001_.png"
+    } else {
+        $panelFilename = ($filenamePrefix -replace '\\', '/').Split('/')[-1]
+        Join-Path (Join-Path $comicConfig.OutputRoot "panels") "$($panelFilename)_00001_.png"
+    }
     $panelPrompt = if ($UseFallbackPrompts -and $panel.fallback_prompt) {
         [string]$panel.fallback_prompt
     } else {

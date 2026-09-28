@@ -203,7 +203,8 @@ def check_panel(
             issues.append("workflow_json_save_prefix_mismatch_manifest")
     workflow_prefix = first_or_empty(workflow_json["save_filename_prefixes"])
     if workflow_prefix and status_panel.get("expected_panel_path"):
-        if not output_matches_prefix(status_panel.get("expected_panel_path", ""), workflow_prefix):
+        backend = workflow_panel.get("image_backend") or os.getenv("COMIC_PIPELINE_IMAGE_BACKEND") or "comfyui"
+        if not output_matches_prefix(status_panel.get("expected_panel_path", ""), workflow_prefix, backend):
             issues.append("workflow_json_expected_output_mismatch_status")
     if status_reference and plan_reference and not same_path(status_reference, plan_reference):
         issues.append("status_reference_image_mismatch_plan")
@@ -405,12 +406,16 @@ def expected_output_from_prefix(prefix: str) -> str:
     return str(Path(r"G:\ComfyUI\output") / f"{prefix}_00001_.png")
 
 
-def output_matches_prefix(output_path: str, prefix: str) -> bool:
+def output_matches_prefix(output_path: str, prefix: str, image_backend: str = "comfyui") -> bool:
     if not output_path or not prefix:
         return False
     normalized_output = str(output_path).replace("\\", "/").lower()
-    normalized_prefix = str(prefix).replace("\\", "/").strip("/").lower()
-    return normalized_output.endswith(f"/{normalized_prefix}_00001_.png")
+    normalized_prefix = str(prefix).replace("\\", "/").strip("/")
+    if image_backend == "direct_api":
+        output_root = Path(os.getenv("COMIC_PIPELINE_OUTPUT_ROOT") or (Path(os.getenv("COMIC_PIPELINE_COMFY_OUTPUT_ROOT") or "output") / "ComicPipeline"))
+        filename = normalized_prefix.rsplit("/", 1)[-1]
+        return same_path(output_path, str(output_root / "panels" / f"{filename}_00001_.png"))
+    return normalized_output.endswith(f"/{normalized_prefix.lower()}_00001_.png")
 
 
 def first_or_empty(values: list[str]) -> str:

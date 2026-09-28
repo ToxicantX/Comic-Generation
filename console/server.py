@@ -152,7 +152,7 @@ STAGE_MAP = {
     },
     "generate": {
         "label": "小批量生成漫画",
-        "args": ["-FromStage", "comfy_health", "-UntilStage", "generate_panels", "-GenerateImages", "-CheckComfyHealth", "-AllowDraftWarnings"],
+        "args": ["-FromStage", "comfy_health", "-UntilStage", "assemble_pages", "-GenerateImages", "-AssemblePages", "-CheckComfyHealth", "-AllowDraftWarnings"],
         "needs_generation": True,
     },
     "review": {
@@ -659,8 +659,8 @@ def short_stem(episode_number: int) -> str:
     return f"ssj_comic_ep{episode_number:02d}"
 
 
-def load_episode_plan(episode_number: int) -> dict:
-    return read_optional_json(project_episode_plan_path(episode_number)) or {}
+def load_episode_plan(episode_number: int, project: dict | None = None) -> dict:
+    return read_optional_json(project_episode_plan_path(episode_number, project)) or {}
 
 
 def project_episode_record(project: dict, episode_number: int) -> dict:
@@ -877,8 +877,8 @@ def hydrate_episode_plan_source_excerpts(project: dict, episode_number: int, pla
     }
 
 
-def output_root() -> Path:
-    config = effective_config(active_project())
+def output_root(project: dict | None = None) -> Path:
+    config = effective_config(project or active_project())
     return Path(config.get("COMIC_PIPELINE_OUTPUT_ROOT", DEFAULTS["COMIC_PIPELINE_OUTPUT_ROOT"]))
 
 
@@ -967,16 +967,16 @@ def find_latest_output(prefix: str, folder: Path) -> Path | None:
     return files[0] if files else None
 
 
-def page_image_path(episode_number: int, page_id: str) -> Path:
-    return output_root() / "pages" / f"{page_id}.png"
+def page_image_path(episode_number: int, page_id: str, project: dict | None = None) -> Path:
+    return output_root(project) / "pages" / f"{page_id}.png"
 
 
 def panel_prefix_from_id(panel_id: str) -> str:
     return f"{panel_id}_v001"
 
 
-def panel_image_path(panel_id: str) -> Path | None:
-    return find_latest_output(panel_prefix_from_id(panel_id), output_root() / "panels")
+def panel_image_path(panel_id: str, project: dict | None = None) -> Path | None:
+    return find_latest_output(panel_prefix_from_id(panel_id), output_root(project) / "panels")
 
 
 def workflow_path_for_panel(panel_id: str) -> Path | None:
@@ -993,12 +993,15 @@ def workflow_path_for_panel(panel_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def expected_output_from_workflow(workflow: dict) -> str:
+def expected_output_from_workflow(workflow: dict, project: dict | None = None) -> str:
     for node in workflow.get("prompt", {}).values():
         if not isinstance(node, dict) or node.get("class_type") != "SaveImage":
             continue
         prefix = node.get("inputs", {}).get("filename_prefix")
         if prefix:
+            if project and normalize_backend(effective_config(project).get("COMIC_PIPELINE_IMAGE_BACKEND")) == "direct_api":
+                filename = str(prefix).replace("\\", "/").rsplit("/", 1)[-1]
+                return str(output_root(project) / "panels" / f"{filename}_00001_.png")
             return str(comfy_output_root() / f"{prefix}_00001_.png")
     return ""
 
@@ -1193,29 +1196,31 @@ def create_asset_workflow(
     return workflow_path
 
 
-def plan_path_for_page(page_id: str) -> Path:
+def plan_path_for_page(page_id: str, project: dict | None = None) -> Path:
     safe = page_id.lower()
+    manifest_dir = project_manifest_dir(project)
     candidates = [
-        project_manifest_dir() / f"{safe}_plan.json",
-        project_manifest_dir() / f"{safe.replace('_comic_', '_comic_')}_plan.json",
+        manifest_dir / f"{safe}_plan.json",
+        manifest_dir / f"{safe.replace('_comic_', '_comic_')}_plan.json",
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    matches = sorted(project_manifest_dir().glob(f"*{safe.split('_', 1)[-1]}*_plan.json"))
+    matches = sorted(manifest_dir.glob(f"*{safe.split('_', 1)[-1]}*_plan.json"))
     return matches[0] if matches else candidates[0]
 
 
-def workflow_result_path_for_page(page_id: str) -> Path:
+def workflow_result_path_for_page(page_id: str, project: dict | None = None) -> Path:
     safe = page_id.lower()
+    manifest_dir = project_manifest_dir(project)
     candidates = [
-        project_manifest_dir() / f"{safe}_workflows.json",
-        project_manifest_dir() / f"{safe}_fallback_workflows.json",
+        manifest_dir / f"{safe}_workflows.json",
+        manifest_dir / f"{safe}_fallback_workflows.json",
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    matches = sorted(project_manifest_dir().glob(f"*{safe.split('_', 1)[-1]}*_workflows.json"))
+    matches = sorted(manifest_dir.glob(f"*{safe.split('_', 1)[-1]}*_workflows.json"))
     return matches[0] if matches else candidates[0]
 
 
@@ -1228,8 +1233,8 @@ def workflow_entries_for_page(page_id: str) -> list[dict]:
     return []
 
 
-def assembly_path_for_page(page_id: str) -> Path:
-    return project_manifest_dir() / f"{page_id.lower()}_assembly.json"
+def assembly_path_for_page(page_id: str, project: dict | None = None) -> Path:
+    return project_manifest_dir(project) / f"{page_id.lower()}_assembly.json"
 
 
 def make_media_item(kind: str, item_id: str, path: Path | None, title: str = "", page_id: str = "", panel_id: str = "") -> dict:
@@ -1521,23 +1526,23 @@ def panel_id_for(page_id: str, panel: dict, index: int) -> str:
     return str(panel.get("panel_id") or f"{page_id}_PANEL{index + 1:02d}")
 
 
-def episode_media(episode_number: int) -> dict:
-    project = active_project()
-    plan = load_episode_plan(episode_number)
+def episode_media(episode_number: int, project: dict | None = None) -> dict:
+    project = project or active_project()
+    plan = load_episode_plan(episode_number, project)
     pages = []
     panels = []
     for page in plan.get("pages", []) if isinstance(plan, dict) else []:
         page_id = str(page.get("page_id") or "")
         if not page_id:
             continue
-        pages.append(make_media_item("page", page_id, page_image_path(episode_number, page_id), page.get("title", ""), page_id=page_id))
+        pages.append(make_media_item("page", page_id, page_image_path(episode_number, page_id, project), page.get("title", ""), page_id=page_id))
         for index, panel in enumerate(page.get("panels", [])):
             panel_id = panel_id_for(page_id, panel, index)
             panels.append(
                 make_media_item(
                     "panel",
                     panel_id,
-                    panel_image_path(panel_id),
+                    panel_image_path(panel_id, project),
                     panel.get("title", ""),
                     page_id=page_id,
                     panel_id=panel_id,
@@ -2209,17 +2214,15 @@ def generation_context_matches_item(context_snapshot: dict, item: dict) -> bool:
     item_page_id = str(item.get("page_id") or item.get("id") or "")
     item_panel_id = str(item.get("panel_id") or item.get("id") or "")
     if item_kind == "page":
-        if context_page_ids:
+        if "page_ids" in context_snapshot:
             return item_page_id in context_page_ids
         return bool(context_page_id and item_page_id == context_page_id)
-    if item_kind == "panel" and context_panel_ids:
+    if item_kind == "panel" and "panel_ids" in context_snapshot:
         return item_panel_id in context_panel_ids
     if item_kind == "panel" and context_page_id:
         return item_page_id == context_page_id
     if item_kind == "panel" and context_page_ids:
         return item_page_id in context_page_ids
-    if not context_page_id and not context_panel_ids:
-        return item_kind in {"page", "panel"}
     return False
 
 
@@ -2651,6 +2654,7 @@ def add_close_reading_protection_context(project: dict, episode_number: int, con
 def media_output_record(project: dict, episode_number: int, item: dict) -> dict:
     context_snapshot = getattr(_REQUEST_CONTEXT, "generation_context", None)
     source_job_id = str(getattr(_REQUEST_CONTEXT, "source_job_id", "") or "")
+    matches_context = generation_context_matches_item(context_snapshot, item)
     metadata = {
         "media_id": item.get("id", ""),
         "page_id": item.get("page_id", ""),
@@ -2664,13 +2668,11 @@ def media_output_record(project: dict, episode_number: int, item: dict) -> dict:
         "production_status": item.get("production_status", ""),
         "synced_at": datetime.now().isoformat(timespec="seconds"),
         "source": "episode_media",
-        "source_job_id": source_job_id,
     }
-    if generation_context_matches_item(context_snapshot, item):
+    if matches_context:
         metadata["generation_context"] = context_snapshot
-    return {
+    record = {
         "chapter_number": episode_number,
-        "job_id": source_job_id,
         "output_type": item.get("kind") or "panel",
         "page_index": page_number_from_id(item.get("page_id") or item.get("id")),
         "panel_index": panel_number_from_id(item.get("panel_id") or item.get("id")) or None,
@@ -2679,6 +2681,10 @@ def media_output_record(project: dict, episode_number: int, item: dict) -> dict:
         "metadata": metadata,
         "review_status": "pending_review",
     }
+    if matches_context and source_job_id:
+        record["job_id"] = source_job_id
+        metadata["source_job_id"] = source_job_id
+    return record
 
 
 def output_version_record(output: dict, role: str, reason: str = "", source_job_id: str = "", file_path: str = "", metadata: dict | None = None) -> dict:
@@ -2738,16 +2744,66 @@ def record_previous_output_version(project: dict, output: dict, backup_path: str
 
 
 def sync_and_record_job_output_versions(project: dict, episode_number: int, job: dict) -> dict:
+    stage = job.get("stage")
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    if not result and job.get("result_path"):
+        result = read_optional_json(Path(job["result_path"])) or {}
+    partial = job.get("status") == "partial" or result.get("partial") or result.get("status") == "partial"
+    post_process = job.get("post_process") or result.get("post_process") or {}
+    if (
+        stage not in {"generate", "regenerate", "regenerate_page"}
+        or job.get("status") in {"failed", "cancelled", "cancelling"}
+        or result.get("status") in {"failed", "cancelled"}
+        or result.get("cancelled") or result.get("blocked") or result.get("waiting")
+        or result.get("dry_run") or (job.get("retry_payload") or {}).get("dry_run")
+        or (job.get("exit_code") not in {None, 0} and not partial)
+        or (result.get("completed") is False and not partial)
+        or (result.get("ok") is False and not partial)
+        or (post_process and (not post_process.get("attempted") or post_process.get("exit_code") != 0))
+    ):
+        return {"ok": True, "episode_number": episode_number, "outputs": [], "versions_recorded": []}
     context_snapshot = dict(job.get("generation_context") or {}) if isinstance(job.get("generation_context"), dict) else {}
-    if job.get("stage") == "generate":
-        result = job.get("result") if isinstance(job.get("result"), dict) else {}
-        attempted = result.get("jobs_attempted") if isinstance(result.get("jobs_attempted"), list) else []
-        target_panel_ids = {str(item.get("panel_id") or "") for item in attempted if item.get("panel_id")}
-        target_page_ids = {str(item.get("page_id") or "") for item in attempted if item.get("page_id")}
-        if target_panel_ids:
-            context_snapshot["panel_ids"] = sorted(target_panel_ids)
-        if target_page_ids:
-            context_snapshot["page_ids"] = sorted(target_page_ids)
+    target_panel_ids = set()
+    target_page_ids = set()
+    if stage == "generate":
+        recovery = result
+        recovery_path = str((result.get("paths") or {}).get("recovery_result") or "")
+        if "jobs_attempted" not in result and recovery_path:
+            recovery = read_optional_json(Path(recovery_path)) or {}
+        attempted = recovery.get("jobs_attempted") or []
+        successful = [item for item in attempted if isinstance(item, dict) and item.get("completed") is True and not item.get("skipped")]
+        target_panel_ids = {str(item["panel_id"]).upper() for item in successful if item.get("panel_id")}
+        target_page_ids = {str(item["page_id"]).upper() for item in successful if item.get("page_id") and item.get("panel_id")}
+        assemblies = recovery.get("pages_assembled")
+        for pipeline_stage in result.get("stages") or []:
+            if pipeline_stage.get("name") == "assemble_pages":
+                assemblies = pipeline_stage.get("runs") or []
+        if isinstance(assemblies, list):
+            target_page_ids = {
+                str(item.get("page_id") or "").upper() for item in assemblies
+                if item.get("assembly_ok") is True and item.get("exit_code") == 0
+            }
+    elif stage == "regenerate":
+        if job.get("panel_id"):
+            target_panel_ids = {str(job["panel_id"]).upper()}
+            if job.get("page_id"):
+                target_page_ids = {str(job["page_id"]).upper()}
+    elif stage == "regenerate_page":
+        runs = job.get("runs") if isinstance(job.get("runs"), list) else result.get("runs") or []
+        requested_panel_ids = {str(value).upper() for value in (job.get("panel_ids") or []) if value}
+        page_id = str(job.get("page_id") or "").upper()
+        target_panel_ids = {
+            str(item["panel_id"]).upper() for item in runs
+            if item.get("ok") is True and item.get("panel_id")
+            and output_page_id({"metadata": {"panel_id": item["panel_id"]}}) == page_id
+            and (not requested_panel_ids or str(item["panel_id"]).upper() in requested_panel_ids)
+        }
+        if target_panel_ids and page_id:
+            target_page_ids = {page_id}
+    if not target_panel_ids and not target_page_ids:
+        return {"ok": True, "episode_number": episode_number, "outputs": [], "versions_recorded": []}
+    context_snapshot["panel_ids"] = sorted(target_panel_ids)
+    context_snapshot["page_ids"] = sorted(target_page_ids)
     previous_context = getattr(_REQUEST_CONTEXT, "generation_context", None)
     previous_source_job_id = getattr(_REQUEST_CONTEXT, "source_job_id", "")
     if isinstance(context_snapshot, dict) and context_snapshot:
@@ -2756,33 +2812,47 @@ def sync_and_record_job_output_versions(project: dict, episode_number: int, job:
         _REQUEST_CONTEXT.generation_context = None
     _REQUEST_CONTEXT.source_job_id = str(job.get("id") or "")
     try:
-        sync_result = sync_outputs_api({"episode_number": episode_number})
+        sync_result = sync_outputs_api({"episode_number": episode_number}, project)
     finally:
         _REQUEST_CONTEXT.generation_context = previous_context
         _REQUEST_CONTEXT.source_job_id = previous_source_job_id
     recorded = []
-    output_ids = {int(item.get("id") or 0) for item in sync_result.get("outputs", []) if item.get("id")}
-    target_panel_ids = {str(value) for value in (job.get("panel_ids") or context_snapshot.get("panel_ids") or []) if value}
-    target_page_ids = {str(value) for value in (context_snapshot.get("page_ids") or []) if value}
-    for output_id in output_ids:
+    quality_checks, quality_summary = clean_output_quality_checks([])
+    for index, synced in enumerate(sync_result.get("outputs", [])):
+        output_id = int(synced.get("id") or 0)
         output = db.get_generated_output(database_url(), output_id)
-        if not output:
+        if not output or output.get("project_slug") != project["slug"]:
             continue
-        metadata = output.get("metadata") or {}
-        page_id = str(metadata.get("page_id") or job.get("page_id") or "")
-        panel_id = str(metadata.get("panel_id") or job.get("panel_id") or "")
-        if job.get("stage") == "regenerate" and panel_id and panel_id != str(job.get("panel_id") or ""):
+        page_id = output_page_id(output)
+        panel_id = output_panel_id(output) if output.get("output_type") == "panel" else ""
+        if output.get("output_type") == "panel":
+            if panel_id not in target_panel_ids:
+                continue
+        elif output.get("output_type") == "page":
+            if page_id not in target_page_ids:
+                continue
+        else:
             continue
-        if job.get("stage") == "regenerate_page" and page_id and page_id != str(job.get("page_id") or ""):
-            continue
-        if job.get("stage") == "regenerate_page" and panel_id and target_panel_ids and panel_id not in target_panel_ids:
-            continue
-        if job.get("stage") == "generate" and panel_id and target_panel_ids and panel_id not in target_panel_ids:
-            continue
-        if job.get("stage") == "generate" and not panel_id and page_id and target_page_ids and page_id not in target_page_ids:
-            continue
-        if job.get("stage") == "generate" and target_panel_ids and not panel_id and not page_id:
-            continue
+        before = output
+        output = db.update_generated_output(database_url(), output_id, {
+            "review_status": "pending_review",
+            "metadata": {
+                "reviewed_at": "",
+                "review_action": "",
+                "review_comment": "",
+                "review_quality_checks": quality_checks,
+                "review_quality_summary": quality_summary,
+            },
+        })
+        sync_result["outputs"][index] = output
+        db.add_review(database_url(), project["slug"], {
+            "target_type": "generated_output",
+            "target_id": output_id,
+            "action": "generation:pending_review",
+            "comment": "",
+            "before_data": before,
+            "after_data": output,
+        })
         reason = "小批量生成后记录当前版本"
         if job.get("stage") == "regenerate":
             reason = "重生成后记录当前版本"
@@ -2804,14 +2874,21 @@ def sync_and_record_job_output_versions(project: dict, episode_number: int, job:
         if version:
             recorded.append(version)
     sync_result["versions_recorded"] = recorded
+    if recorded:
+        approvals = db.get_approvals(database_url(), project["slug"], episode_number) or default_approval_state()
+        approvals.update({"generation": False, "qa": False, "next_episode": False})
+        db.save_approvals(database_url(), project["slug"], episode_number, approvals)
+        qa_result_path = project_manifest_dir(project) / f"{project_episode_stem(project, episode_number)}_pipeline_run.json"
+        qa_result_path.write_text(json.dumps({"completed": False, "stages": [], "invalidated_by": job.get("id", "")}), encoding="utf-8")
+        sync_result["media"] = attach_output_db_state(project, sync_result["media"])
     return sync_result
 
 
-def sync_outputs_api(payload: dict) -> dict:
+def sync_outputs_api(payload: dict, project: dict | None = None) -> dict:
     ensure_database()
-    project = active_project()
+    project = project or active_project()
     episode_number = int(payload.get("episode_number") or payload.get("episode") or 3)
-    media = episode_media(episode_number)
+    media = episode_media(episode_number, project)
     synced = []
     skipped = []
     skipped_placeholder = []
@@ -2846,7 +2923,10 @@ def sync_outputs_api(payload: dict) -> dict:
                         )
                 continue
         before = db.get_generated_output_by_path(database_url(), project["slug"], item.get("path", ""))
-        saved = db.upsert_generated_output(database_url(), project["slug"], media_output_record(project, episode_number, item))
+        record = media_output_record(project, episode_number, item)
+        if before:
+            record["review_status"] = before["review_status"]
+        saved = db.upsert_generated_output(database_url(), project["slug"], record)
         synced.append(saved)
         ensure_initial_output_version(project, saved)
         if not before:
@@ -3936,7 +4016,7 @@ def generated_output_quality_status(project: dict, episode_number: int) -> dict:
     checked_quality = 0
     for row in approved_rows:
         metadata = row.get("metadata") or {}
-        summary = metadata.get("review_quality_summary") or {}
+        _checks, summary = clean_output_quality_checks(metadata.get("review_quality_checks"))
         failed = int(summary.get("failed") or 0)
         unknown = int(summary.get("unknown") or 0)
         passed = int(summary.get("passed") or 0)
@@ -3953,13 +4033,19 @@ def generated_output_quality_status(project: dict, episode_number: int) -> dict:
         "quality_checked": checked_quality,
         "quality_missing": missing_quality,
         "quality_failed": failed_quality,
-        "ready": bool(approved_rows) and not missing_quality and not failed_quality,
+        "ready": bool(rows) and len(approved_rows) == len(rows) and checked_quality == len(rows),
     }
 
 
 def qa_report_ready(status: dict) -> bool:
     texts = status.get("texts", {})
-    return bool(texts.get("image_health_qa_md") or texts.get("status_md"))
+    if not (texts.get("image_health_qa_md") or texts.get("status_md")):
+        return False
+    stages = (status.get("pipeline_result") or {}).get("stages") or []
+    stage_status = {item.get("name"): item.get("status") for item in stages if isinstance(item, dict)}
+    return all(stage_status.get(name) == "passed" for name in (
+        "assemble_pages", "lettering_qa", "consistency_qa", "image_health_qa",
+    ))
 
 
 def generation_backend_ready(health: dict) -> bool:
@@ -4135,15 +4221,21 @@ def assert_approval_allowed(episode_number: int, gate: str, approvals: dict) -> 
         if not media["complete"]:
             raise ValueError("生成结果尚未完整，不能通过生成审核。")
         quality = generated_output_quality_status(active_project(), episode_number)
+        if quality["total_outputs"] < media["pages_total"] + media["panels_total"]:
+            raise ValueError("生成结果尚未全部入库并逐项审核，不能通过生成审核。")
+        if quality["approved_outputs"] != quality["total_outputs"]:
+            raise ValueError("仍有生成结果待审、待改或已拒绝，请先逐项审核通过。")
         if quality["quality_failed"]:
             raise ValueError(f"还有 {quality['quality_failed']} 个已通过输出标记质量问题，不能通过生成审核。")
         if quality["quality_missing"]:
             raise ValueError(f"还有 {quality['quality_missing']} 个已通过输出缺少质量检查，不能通过生成审核。")
+        if not quality["ready"]:
+            raise ValueError("请先逐项审核生成结果并确认全部质量检查，再通过生成审核。")
     if gate == "qa":
         if not approvals.get("generation"):
             raise ValueError("请先通过生成审核，再确认 QA。")
         if not qa_report_ready(status):
-            raise ValueError("QA 报告尚未生成，不能通过 QA 审核。")
+            raise ValueError("QA 尚未完成或存在技术检查失败，请重新运行并通过页面、文字、一致性和图像健康检查。")
     if gate == "next_episode":
         if not approvals.get("qa"):
             raise ValueError("请先通过 QA 审核，再进入下一章。")
@@ -4546,8 +4638,8 @@ def agent_simulate(episode_number: int) -> dict:
     }
 
 
-def backup_existing_panel_image(panel_id: str) -> str:
-    path = panel_image_path(panel_id)
+def backup_existing_panel_image(panel_id: str, project: dict | None = None) -> str:
+    path = panel_image_path(panel_id, project)
     if not path or not path.is_file():
         return ""
     backup_dir = path.parent / "_regenerate_backups"
@@ -4674,12 +4766,11 @@ def complete_asset_regeneration(project: dict, job: dict) -> dict:
     return {"asset": updated, "version": version}
 
 
-def assemble_page_for_panel(page_id: str) -> dict:
-    plan_path = plan_path_for_page(page_id)
-    workflow_result_path = workflow_result_path_for_page(page_id)
-    if not workflow_result_path.is_file():
-        workflow_result_path = Path("")
-    manifest_path = assembly_path_for_page(page_id)
+def assemble_page_for_panel(page_id: str, project: dict | None = None) -> dict:
+    project = project or active_project()
+    plan_path = plan_path_for_page(page_id, project)
+    workflow_result_path = workflow_result_path_for_page(page_id, project)
+    manifest_path = assembly_path_for_page(page_id, project)
     if not plan_path.is_file() or not workflow_result_path.is_file():
         return {
             "attempted": False,
@@ -4700,7 +4791,15 @@ def assemble_page_for_panel(page_id: str) -> dict:
         "-ManifestPath",
         str(manifest_path),
     ]
-    completed = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    config = effective_config(project)
+    env = os.environ.copy()
+    env.update(config)
+    env.update({
+        "COMIC_PIPELINE_WORKSPACE": str(ROOT),
+        "COMIC_PIPELINE_MANIFEST_DIR": str(project_manifest_dir(project)),
+        "PYTHONIOENCODING": "utf-8",
+    })
+    completed = subprocess.run(cmd, cwd=str(ROOT), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return {
         "attempted": True,
         "exit_code": completed.returncode,
@@ -5043,14 +5142,14 @@ def start_regenerate_job(payload: dict) -> dict:
     project = active_project()
     generation_context = build_generation_context_snapshot(project, episode_number, page_id, [panel_id])
     workflow = read_optional_json(workflow_path) or {}
-    panel_path = str(panel_image_path(panel_id) or expected_output_from_workflow(workflow))
+    panel_path = str(panel_image_path(panel_id, project) or expected_output_from_workflow(workflow, project))
     previous_output = db.get_generated_output_by_path(database_url(), project["slug"], panel_path)
     previous_metadata = previous_output.get("metadata") if previous_output and isinstance(previous_output.get("metadata"), dict) else {}
     regenerate_reason = str(payload.get("reason") or previous_metadata.get("review_comment") or "").strip()
     if regenerate_reason:
         generation_context["review_feedback"] = regenerate_reason
     runtime_workflow_path = prepare_runtime_workflow(workflow_path, project, generation_context, job_id, panel_id)
-    backup_path = backup_existing_panel_image(panel_id)
+    backup_path = backup_existing_panel_image(panel_id, project)
     if previous_output and backup_path:
         record_previous_output_version(
             project,
@@ -5481,11 +5580,12 @@ def _run_regenerate_page_job(job_id: str) -> None:
         )
         panel_result_path = project_manifest_dir(project) / "comic_runs" / f"{panel_id.lower()}_page_regenerate_{safe_stem(job_id)}.json"
         workflow = read_optional_json(runtime_workflow_path) or {}
-        panel_target_path = panel_image_path(panel_id) or Path(expected_output_from_workflow(workflow))
+        existing_panel_path = panel_image_path(panel_id, project)
+        panel_target_path = existing_panel_path or Path(expected_output_from_workflow(workflow, project))
         backup_path = ""
-        previous_output = db.get_generated_output_by_path(database_url(), project["slug"], str(panel_image_path(panel_id) or ""))
-        if panel_image_path(panel_id):
-            backup_path = backup_existing_panel_image(panel_id)
+        previous_output = db.get_generated_output_by_path(database_url(), project["slug"], str(existing_panel_path or ""))
+        if existing_panel_path:
+            backup_path = backup_existing_panel_image(panel_id, project)
         with JOB_LOCK:
             live = JOBS.get(job_id)
             if live is not None:
@@ -5516,6 +5616,8 @@ def _run_regenerate_page_job(job_id: str) -> None:
         ok = completed.returncode == 0 or bool(panel_result.get("completed"))
         if not ok:
             failed += 1
+            if backup_path:
+                shutil.copy2(backup_path, panel_target_path)
         runs.append({
             "panel_id": panel_id,
             "workflow_path": str(workflow_path),
@@ -5537,6 +5639,9 @@ def _run_regenerate_page_job(job_id: str) -> None:
             live["stdout_tail"] = f"{index}/{len(panel_ids)} {panel_id} {'完成' if ok else '失败'}"
 
     if was_job_cancelled(job_id):
+        with JOB_LOCK:
+            cancelled_job = dict(JOBS[job_id])
+        restored_output_path = restore_job_backup(cancelled_job)
         result = {
             "ok": False,
             "updated": datetime.now().isoformat(timespec="seconds"),
@@ -5557,29 +5662,38 @@ def _run_regenerate_page_job(job_id: str) -> None:
             live["exit_code"] = -1
             live["command"] = command_log
             live["result"] = result
+            live["restored_output_path"] = restored_output_path
             live["stdout_tail"] = f"任务已取消：已处理 {len(runs)}/{len(panel_ids)} 个分镜。"
             live["stderr_tail"] = ""
             live["progress"] = {"total": len(panel_ids), "completed": len(runs) - failed, "failed": failed, "cancelled": True}
             db.save_job(database_url(), live.get("project_slug") or active_project_slug(), live)
         return
 
-    post_process = assemble_page_for_panel(page_id)
+    post_process = assemble_page_for_panel(page_id, project)
+    assembly_ok = bool(post_process.get("attempted")) and post_process.get("exit_code") == 0
     sync_result = {}
-    if post_process.get("attempted"):
+    if assembly_ok:
         try:
-            sync_result = sync_and_record_job_output_versions(project, episode_number, {**job, "stage": "regenerate_page"})
+            sync_result = sync_and_record_job_output_versions(project, episode_number, {**job, "stage": "regenerate_page", "runs": runs})
         except Exception as exc:
             sync_result = {"ok": False, "error": str(exc)}
+    errors = []
+    if failed:
+        errors.append(f"{failed} panel(s) failed")
+    if not assembly_ok:
+        errors.append("页面合成失败：" + str(post_process.get("stderr_tail") or post_process.get("reason") or "请查看拼版日志"))
+    if sync_result.get("ok") is False:
+        errors.append("生成结果入库失败：" + str(sync_result.get("error") or "请查看数据库状态"))
     result = {
         "updated": datetime.now().isoformat(timespec="seconds"),
         "page_id": page_id,
         "episode_number": episode_number,
-        "completed": failed == 0 and bool(post_process.get("attempted")),
-        "status": "success" if failed == 0 else "partial",
+        "completed": not errors,
+        "status": "success" if not errors else "partial",
         "runs": runs,
         "post_process": post_process,
         "sync_result": sync_result,
-        "error": "" if failed == 0 else f"{failed} panel(s) failed",
+        "error": "\n".join(errors),
     }
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     with JOB_LOCK:
@@ -5589,8 +5703,8 @@ def _run_regenerate_page_job(job_id: str) -> None:
         live["exit_code"] = 0 if result["completed"] else 1
         live["command"] = command_log
         live["result"] = result
-        live["stdout_tail"] = f"页面补生成完成：成功 {len(panel_ids) - failed}/{len(panel_ids)}，页面合成 {'已执行' if post_process.get('attempted') else '未执行'}。"
-        live["stderr_tail"] = "\n".join([run["stderr_tail"] for run in runs if run.get("stderr_tail")][-5:])
+        live["stdout_tail"] = f"分镜生成成功 {len(panel_ids) - failed}/{len(panel_ids)}，页面合成 {'成功' if assembly_ok else '失败或未执行'}。"
+        live["stderr_tail"] = "\n".join([*errors, *[run["stderr_tail"] for run in runs if run.get("stderr_tail")][-5:]])
         live["post_process"] = post_process
         live["progress"] = {"total": len(panel_ids), "completed": len(panel_ids) - failed, "failed": failed}
         try:
@@ -9880,6 +9994,8 @@ def start_job(payload: dict) -> dict:
         raise ValueError(f"Unknown stage: {stage}")
     episode_number = int(payload.get("episode_number") or 3)
     assert_stage_allowed(stage, episode_number)
+    if stage == "review":
+        set_episode_approval_gate(episode_number, "qa", False, validate=False)
     project = active_project()
     episode_plan_path = project_episode_plan_path(episode_number, project)
     novel_path = project.get("novel_path") or config_snapshot()["config"].get("COMIC_PIPELINE_NOVEL_PATH", "")
@@ -9902,7 +10018,7 @@ def start_job(payload: dict) -> dict:
     generation_context = build_generation_context_snapshot(project, episode_number) if stage in {"generate", "close_reading"} else {}
     if stage == "close_reading":
         generation_context = add_close_reading_protection_context(project, episode_number, generation_context)
-    if stage == "generate":
+    if stage in {"generate", "close_reading"}:
         hydrate_episode_asset_aliases(project, episode_number, generation_context)
     generation_context_path = write_generation_context_file(generation_context, job_id) if stage in {"generate", "close_reading"} else ""
     if STAGE_MAP[stage].get("custom") == "close_reading":
@@ -10059,6 +10175,10 @@ def _run_job(job_id: str) -> None:
         if live:
             current = live.get("progress", {}).get("current") if isinstance(live.get("progress"), dict) else ""
             live["progress"] = job_progress_state(current=current or f"{live.get('label') or '任务'}运行中")
+    qa_result_path = None
+    if job.get("stage") == "review":
+        qa_result_path = project_manifest_dir(project) / f"{project_episode_stem(project, int(job['episode_number']))}_pipeline_run.json"
+        qa_result_path.write_text(json.dumps({"completed": False, "stages": [], "job_id": job_id}), encoding="utf-8")
     try:
         completed = run_job_process(job_id, job["command"], env)
     except Exception as exc:
@@ -10122,6 +10242,8 @@ def _run_job(job_id: str) -> None:
             db.save_job(database_url(), job.get("project_slug") or active_project_slug(), job)
         return
     post_process = None
+    if qa_result_path:
+        qa_result_path.write_text(json.dumps(result or {"completed": False, "stages": []}, ensure_ascii=False, indent=2), encoding="utf-8")
     result_waiting = bool(result and result.get("waiting"))
     result_partial = bool(result and result.get("partial"))
     result_completed = bool(result and result.get("completed"))
@@ -10151,11 +10273,22 @@ def _run_job(job_id: str) -> None:
                 }],
             }
     if (completed.returncode == 0 or result_completed) and job.get("stage") == "regenerate" and job.get("page_id"):
-        post_process = assemble_page_for_panel(str(job.get("page_id")))
-        try:
-            job["sync_result"] = sync_and_record_job_output_versions(project, int(job.get("episode_number") or 0), job)
-        except Exception as exc:
-            job["sync_warning"] = str(exc)
+        post_process = assemble_page_for_panel(str(job.get("page_id")), project)
+        post_process_error = ""
+        if post_process.get("attempted") and post_process.get("exit_code") == 0:
+            try:
+                job["sync_result"] = sync_and_record_job_output_versions(project, int(job.get("episode_number") or 0), job)
+                if job["sync_result"].get("ok") is False:
+                    post_process_error = str(job["sync_result"].get("error") or "生成结果入库失败")
+            except Exception as exc:
+                post_process_error = str(exc)
+        else:
+            post_process_error = str(post_process.get("stderr_tail") or post_process.get("reason") or "页面合成失败")
+        if post_process_error:
+            result = {**(result or {}), "completed": False, "partial": True, "error": post_process_error}
+            result_partial = True
+            result_completed = False
+            stderr = "\n".join(filter(None, [stderr, post_process_error]))
     if (completed.returncode == 0 or result_completed) and job.get("stage") == "process_novel":
         sync_processed_novel_result(job, result)
     if (completed.returncode == 0 or result_completed) and job.get("stage") in {"breakdown", "draft_review", "close_reading"} and job.get("episode_number"):
@@ -10227,7 +10360,7 @@ def _run_job(job_id: str) -> None:
         else:
             job["status"] = "failed"
         job["finished"] = datetime.now().isoformat(timespec="seconds")
-        job["exit_code"] = completed.returncode
+        job["exit_code"] = 1 if result_partial else completed.returncode
         job["stdout_tail"] = "\n".join(stdout.splitlines()[-80:])
         job["stderr_tail"] = "\n".join(stderr.splitlines()[-80:])
         job["result"] = result

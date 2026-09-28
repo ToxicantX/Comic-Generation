@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -27,6 +28,235 @@ def load_server_module():
 
 
 class RuntimeConfigTest(unittest.TestCase):
+    def test_generate_stage_includes_page_assembly_before_review(self):
+        server = load_server_module()
+        args = server.STAGE_MAP["generate"]["args"]
+        self.assertEqual(args[args.index("-UntilStage") + 1], "assemble_pages")
+        self.assertIn("-AssemblePages", args)
+
+    def test_close_reading_hydrates_global_asset_aliases_before_launch(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = {"slug": "novel_a", "manifest_dir": str(root)}
+            context = {"assets": [{"title": "keeper", "file_path": str(root / "asset.png")}]}
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(server, "assert_stage_allowed"))
+                stack.enter_context(patch.object(server, "active_project", return_value=project))
+                stack.enter_context(patch.object(server, "project_episode_plan_path", return_value=root / "plan.json"))
+                stack.enter_context(patch.object(server, "config_snapshot", return_value={"config": server.DEFAULTS.copy()}))
+                stack.enter_context(patch.object(server, "hydrate_episode_plan_source_excerpts"))
+                stack.enter_context(patch.object(server, "build_generation_context_snapshot", return_value=context))
+                stack.enter_context(patch.object(server, "add_close_reading_protection_context", side_effect=lambda _p, _n, value: value))
+                hydrate = stack.enter_context(patch.object(server, "hydrate_episode_asset_aliases"))
+                stack.enter_context(patch.object(server, "write_generation_context_file", return_value=""))
+                stack.enter_context(patch.object(server.db, "save_job"))
+                stack.enter_context(patch.object(server.threading, "Thread"))
+                server.start_job({"stage": "close_reading", "episode_number": 2})
+            hydrate.assert_called_once_with(project, 2, context)
+
+    def test_qa_readiness_requires_all_technical_stages_to_pass(self):
+        server = load_server_module()
+        names = ("assemble_pages", "lettering_qa", "consistency_qa", "image_health_qa")
+        status = {
+            "texts": {"image_health_qa_md": "report exists"},
+            "pipeline_result": {"stages": [{"name": name, "status": "passed"} for name in names]},
+        }
+        self.assertTrue(server.qa_report_ready(status))
+        for name in names:
+            for state in ("failed", "blocked", "waiting", "skipped"):
+                with self.subTest(name=name, state=state):
+                    stages = [{"name": item, "status": state if item == name else "passed"} for item in names]
+                    self.assertFalse(server.qa_report_ready({**status, "pipeline_result": {"stages": stages}}))
+        self.assertFalse(server.qa_report_ready({"texts": status["texts"]}))
+        self.assertFalse(server.qa_report_ready({**status, "pipeline_result": {"stages": status["pipeline_result"]["stages"][:-1]}}))
+
+    def test_review_job_publishes_current_qa_result_in_task_project(self):
+        for state in ("passed", "failed", "missing"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp_dir:
+                server = load_server_module()
+                project = {"slug": "novel_a", "manifest_dir": temp_dir, "project_config": {}}
+                canonical = Path(temp_dir) / f"{server.project_episode_stem(project, 1)}_pipeline_run.json"
+                canonical.write_text(json.dumps({"completed": True, "stages": []}), encoding="utf-8")
+                result_path = Path(temp_dir) / "review-result.json"
+                result = {"completed": state == "passed", "stages": [
+                    {"name": name, "status": state} for name in (
+                        "assemble_pages", "lettering_qa", "consistency_qa", "image_health_qa",
+                    )
+                ]}
+                if state != "missing":
+                    result_path.write_text(json.dumps(result), encoding="utf-8")
+                server.JOBS["qa-job"] = {
+                    "id": "qa-job", "stage": "review", "project_slug": project["slug"],
+                    "episode_number": 1, "status": "running", "command": ["qa-test"],
+                    "result_path": str(result_path),
+                }
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(server, "project_by_slug", return_value=project))
+                    stack.enter_context(patch.object(server, "active_project", side_effect=AssertionError("project switched")))
+                    stack.enter_context(patch.object(server, "effective_config", return_value=server.DEFAULTS.copy()))
+                    stack.enter_context(patch.object(server, "runtime_config", return_value=server.DEFAULTS.copy()))
+                    stack.enter_context(patch.object(server, "run_job_process", return_value=SimpleNamespace(returncode=0 if state == "passed" else 1, stdout="", stderr="")))
+                    stack.enter_context(patch.object(server, "job_diagnostics", return_value={}))
+                    stack.enter_context(patch.object(server.db, "save_job"))
+                    server._run_job("qa-job")
+                published = json.loads(canonical.read_text(encoding="utf-8"))
+                if state != "missing":
+                    self.assertEqual(published, result)
+                self.assertEqual(server.qa_report_ready({"texts": {"status_md": "report"}, "pipeline_result": published}), state == "passed")
+
+    def test_page_assembly_uses_task_project_paths_and_environment(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest_dir = root / "novel_a"
+            manifest_dir.mkdir()
+            page_id = "NOVEL_A_EP01_P001"
+            (manifest_dir / f"{page_id.lower()}_plan.json").write_text("{}", encoding="utf-8")
+            (manifest_dir / f"{page_id.lower()}_fallback_workflows.json").write_text("{}", encoding="utf-8")
+            project = {"slug": "novel_a", "manifest_dir": str(manifest_dir)}
+            config = {**server.DEFAULTS, "COMIC_PIPELINE_OUTPUT_ROOT": str(root / "novel_a_output")}
+            with patch.object(server, "active_project", side_effect=AssertionError("active project changed")):
+                with patch.object(server, "effective_config", return_value=config) as config_mock:
+                    with patch.object(server.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run_mock:
+                        result = server.assemble_page_for_panel(page_id, project)
+            config_mock.assert_called_once_with(project)
+            command = run_mock.call_args.args[0]
+            self.assertEqual(command[command.index("-PlanPath") + 1], str(manifest_dir / f"{page_id.lower()}_plan.json"))
+            self.assertEqual(run_mock.call_args.kwargs["env"]["COMIC_PIPELINE_OUTPUT_ROOT"], config["COMIC_PIPELINE_OUTPUT_ROOT"])
+            self.assertEqual(run_mock.call_args.kwargs["env"]["COMIC_PIPELINE_MANIFEST_DIR"], str(manifest_dir))
+            self.assertEqual(result["exit_code"], 0)
+
+    def test_page_regeneration_requires_successful_assembly_and_sync(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = {"slug": "novel_a", "manifest_dir": str(root)}
+            workflow_path = root / "workflow.json"
+            workflow_path.write_text("{}", encoding="utf-8")
+            for post_process, sync_error, expected_completed in (
+                ({"attempted": True, "exit_code": 1, "stderr_tail": "assembly failed"}, False, False),
+                ({"attempted": False, "reason": "missing_page_plan_or_workflow_result"}, False, False),
+                ({"attempted": True, "exit_code": 0}, True, False),
+                ({"attempted": True, "exit_code": 0}, False, True),
+            ):
+                with self.subTest(post_process=post_process, sync_error=sync_error):
+                    job_id = "page-job"
+                    server.JOBS[job_id] = {
+                        "id": job_id, "project_slug": project["slug"], "stage": "regenerate_page",
+                        "episode_number": 1, "page_id": "NOVEL_A_EP01_P001", "status": "running",
+                        "panel_ids": ["NOVEL_A_EP01_P001_PANEL01"],
+                        "workflow_paths": {"NOVEL_A_EP01_P001_PANEL01": str(workflow_path)},
+                        "result_path": str(root / "result.json"),
+                    }
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(server, "project_by_slug", return_value=project))
+                        stack.enter_context(patch.object(server, "effective_config", return_value=server.DEFAULTS.copy()))
+                        stack.enter_context(patch.object(server, "panel_image_path", return_value=None))
+                        stack.enter_context(patch.object(server, "expected_output_from_workflow", return_value=str(root / "panel.png")))
+                        stack.enter_context(patch.object(server, "prepare_runtime_workflow", return_value=workflow_path))
+                        stack.enter_context(patch.object(server, "image_workflow_command", return_value=("direct_api", ["image-test"])))
+                        stack.enter_context(patch.object(server, "run_job_process", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")))
+                        assemble_mock = stack.enter_context(patch.object(server, "assemble_page_for_panel", return_value=post_process))
+                        sync_mock = stack.enter_context(patch.object(server, "sync_and_record_job_output_versions", return_value={"ok": True}, side_effect=RuntimeError("database sync failed") if sync_error else None))
+                        stack.enter_context(patch.object(server.db, "get_generated_output_by_path", return_value=None))
+                        stack.enter_context(patch.object(server.db, "save_job"))
+                        server._run_regenerate_page_job(job_id)
+                    assemble_mock.assert_called_once_with("NOVEL_A_EP01_P001", project)
+                    job = server.JOBS[job_id]
+                    self.assertEqual(job["result"]["completed"], expected_completed)
+                    self.assertEqual(job["status"] == "passed", expected_completed)
+                    self.assertEqual(job["exit_code"], 0 if expected_completed else 1)
+                    if not expected_completed:
+                        self.assertTrue(job["result"]["error"])
+                    if post_process.get("exit_code") != 0:
+                        sync_mock.assert_not_called()
+
+    def test_expected_direct_panel_output_uses_project_directory(self):
+        server = load_server_module()
+        project = {"slug": "novel_a"}
+        workflow = {"prompt": {"2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "ComicPipeline/panels/UPPER_PANEL_v001"}}}}
+        with patch.object(server, "effective_config", return_value={
+            "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api", "COMIC_PIPELINE_OUTPUT_ROOT": "novel_a_output",
+        }):
+            path = server.expected_output_from_workflow(workflow, project)
+        self.assertEqual(Path(path), Path("novel_a_output/panels/UPPER_PANEL_v001_00001_.png"))
+
+    def test_single_panel_regeneration_does_not_pass_when_assembly_fails(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = {"slug": "novel_a", "manifest_dir": temp_dir, "project_config": {}}
+            server.JOBS["panel-job"] = {
+                "id": "panel-job", "stage": "regenerate", "project_slug": project["slug"],
+                "page_id": "NOVEL_A_EP01_P001", "episode_number": 1, "status": "running",
+                "command": ["image-test"], "result_path": str(Path(temp_dir) / "result.json"),
+            }
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(server, "project_by_slug", return_value=project))
+                stack.enter_context(patch.object(server, "effective_config", return_value=server.DEFAULTS.copy()))
+                stack.enter_context(patch.object(server, "runtime_config", return_value=server.DEFAULTS.copy()))
+                stack.enter_context(patch.object(server, "run_job_process", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")))
+                stack.enter_context(patch.object(server, "job_diagnostics", return_value={}))
+                assemble_mock = stack.enter_context(patch.object(server, "assemble_page_for_panel", return_value={"attempted": True, "exit_code": 1, "stderr_tail": "assembly failed"}))
+                sync_mock = stack.enter_context(patch.object(server, "sync_and_record_job_output_versions"))
+                stack.enter_context(patch.object(server.db, "save_job"))
+                server._run_job("panel-job")
+            assemble_mock.assert_called_once_with("NOVEL_A_EP01_P001", project)
+            sync_mock.assert_not_called()
+            self.assertEqual(server.JOBS["panel-job"]["status"], "partial")
+            self.assertFalse(server.JOBS["panel-job"]["result"]["completed"])
+            self.assertIn("assembly failed", server.JOBS["panel-job"]["stderr_tail"])
+
+    def test_output_sync_uses_explicit_project_after_project_switch(self):
+        server = load_server_module()
+        project = {"slug": "novel_a"}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(server, "ensure_database"))
+            stack.enter_context(patch.object(server, "active_project", side_effect=AssertionError("active project changed")))
+            media_mock = stack.enter_context(patch.object(server, "episode_media", return_value={"pages": [], "panels": []}))
+            stack.enter_context(patch.object(server, "attach_output_db_state", return_value={}))
+            result = server.sync_outputs_api({"episode_number": 1}, project)
+        media_mock.assert_called_once_with(1, project)
+        self.assertTrue(result["ok"])
+
+    def test_failed_or_cancelled_page_regeneration_restores_existing_panel(self):
+        server = load_server_module()
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                project = {"slug": "novel_a", "manifest_dir": str(root)}
+                panel_id = "NOVEL_A_EP01_P001_PANEL01"
+                panel_path = root / "panels" / f"{panel_id}_v001_00001_.png"
+                panel_path.parent.mkdir()
+                panel_path.write_bytes(b"original-image")
+                workflow_path = root / "workflow.json"
+                workflow_path.write_text("{}", encoding="utf-8")
+                server.JOBS["page-job"] = {
+                    "id": "page-job", "project_slug": project["slug"], "stage": "regenerate_page",
+                    "episode_number": 1, "page_id": "NOVEL_A_EP01_P001", "status": "running",
+                    "panel_ids": [panel_id], "workflow_paths": {panel_id: str(workflow_path)},
+                    "result_path": str(root / "result.json"),
+                }
+                def fail_process(*_args):
+                    panel_path.write_bytes(b"incomplete-image")
+                    if cancelled:
+                        server.JOBS["page-job"]["status"] = "cancelled"
+                    return SimpleNamespace(returncode=1, stdout="", stderr="generation failed")
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(server, "project_by_slug", return_value=project))
+                    stack.enter_context(patch.object(server, "effective_config", return_value={**server.DEFAULTS, "COMIC_PIPELINE_OUTPUT_ROOT": str(root)}))
+                    stack.enter_context(patch.object(server, "prepare_runtime_workflow", return_value=workflow_path))
+                    stack.enter_context(patch.object(server, "image_workflow_command", return_value=("direct_api", ["image-test"])))
+                    stack.enter_context(patch.object(server, "run_job_process", side_effect=fail_process))
+                    stack.enter_context(patch.object(server, "assemble_page_for_panel", return_value={"attempted": True, "exit_code": 0}))
+                    stack.enter_context(patch.object(server, "sync_and_record_job_output_versions", return_value={"ok": True}))
+                    stack.enter_context(patch.object(server.db, "get_generated_output_by_path", return_value=None))
+                    stack.enter_context(patch.object(server.db, "save_job"))
+                    server._run_regenerate_page_job("page-job")
+                self.assertEqual(panel_path.read_bytes(), b"original-image")
+                self.assertFalse(server.JOBS["page-job"]["result"]["completed"])
+                self.assertTrue(all(Path(path).is_file() for path in server.JOBS["page-job"]["backup_paths"].values()))
+
     def test_setting_model_uses_project_config_without_mutating_environment(self):
         server = load_server_module()
         project = {"slug": "novel_a"}
@@ -531,7 +761,7 @@ class RuntimeConfigTest(unittest.TestCase):
         def fake_write_env(path, values, keys):
             writes[Path(path).name] = {key: values.get(key, "") for key in keys}
 
-        with patch.object(server, "CONFIG_PATH", Path("/tmp/.env")):
+        with patch.dict(os.environ, {"COMIC_PIPELINE_TEXT_ENV_PATH": "/tmp/text.env", "COMIC_PIPELINE_IMAGE_ENV_PATH": "/tmp/image.env"}), patch.object(server, "CONFIG_PATH", Path("/tmp/.env")):
             with patch.object(server, "read_env", side_effect=fake_read_env):
                 with patch.object(server, "write_env", side_effect=fake_write_env):
                     with patch.object(Path, "is_file", return_value=True):
@@ -1047,7 +1277,14 @@ class RuntimeConfigTest(unittest.TestCase):
                                     2,
                                     {"ok": True, "image_api_key_configured": True},
                                     detail,
-                                    {"texts": {"image_health_qa_md": "ready"}},
+                                    {
+                                        "texts": {"image_health_qa_md": "ready"},
+                                        "pipeline_result": {"stages": [
+                                            {"name": name, "status": "passed"} for name in (
+                                                "assemble_pages", "lettering_qa", "consistency_qa", "image_health_qa",
+                                            )
+                                        ]},
+                                    },
                                     approvals,
                                 )
 

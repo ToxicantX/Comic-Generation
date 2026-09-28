@@ -65,6 +65,34 @@ class PowerShellConfigTest(unittest.TestCase):
         self.assertIn("COMIC_PIPELINE_COMFY_CHECKPOINT=$ComfyCheckpoint", script)
 
     @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
+    def test_direct_panel_workflow_uses_project_output_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plan_path = root / "plan.json"
+            result_path = root / "result.json"
+            plan_path.write_text(json.dumps({
+                "episode_id": "NOVEL_A_EP01", "page_id": "NOVEL_A_EP01_P001",
+                "panels": [{"panel_id": "NOVEL_A_EP01_P001_PANEL01", "order": 1,
+                            "prompt": "test", "filename_prefix": "ComicPipeline/panels/UPPER_PANEL_v001"}],
+            }), encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "COMIC_PIPELINE_CONFIG_PATH": str(root / "missing.env"),
+                "COMIC_PIPELINE_WORKSPACE": str(ROOT),
+                "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
+                "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(root / "global_output"),
+                "COMIC_PIPELINE_OUTPUT_ROOT": str(root / "novel_a_output"),
+            })
+            result = subprocess.run(
+                [powershell_command(), "-NoProfile", "-File", str(ROOT / "scripts" / "create_comic_panel_workflows.ps1"),
+                 "-PlanPath", str(plan_path), "-WorkflowDir", str(root / "workflows"), "-ResultPath", str(result_path)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(result_path.read_text(encoding="utf-8-sig"))
+            self.assertEqual(Path(manifest["created"][0]["expected_panel_path"]), root / "novel_a_output" / "panels" / "UPPER_PANEL_v001_00001_.png")
+
+    @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
     def test_local_panel_workflow_uses_shared_template_and_controlnet_input(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -116,6 +144,7 @@ class PowerShellConfigTest(unittest.TestCase):
             env.update({
                 "COMIC_PIPELINE_CONFIG_PATH": str(config_path),
                 "COMIC_PIPELINE_WORKSPACE": str(ROOT),
+                "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(root / "output"),
             })
             result = subprocess.run(
                 [powershell_command(), "-NoProfile", "-File", str(ROOT / "scripts" / "create_comic_panel_workflows.ps1"),
@@ -140,6 +169,7 @@ class PowerShellConfigTest(unittest.TestCase):
             self.assertTrue(copied.is_file())
             manifest = json.loads(result_path.read_text(encoding="utf-8-sig"))
             self.assertEqual(manifest["created"][0]["image_backend"], "comfyui")
+            self.assertEqual(Path(manifest["created"][0]["expected_panel_path"]), root / "output" / "ComicPipeline" / "panels" / "test_panel_00001_.png")
 
     @unittest.skipUnless(powershell_command(), "PowerShell is not installed")
     def test_wait_script_exits_on_comfy_error(self):
