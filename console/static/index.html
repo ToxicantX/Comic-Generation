@@ -29,6 +29,7 @@
           <button data-module="assets" type="button"><span aria-hidden="true">◇</span>素材库</button>
           <button data-module="workflow" data-workspace-tab="media" type="button"><span aria-hidden="true">▧</span>漫画制作</button>
         </div>
+        <section id="railChapterContext" class="rail-chapter-context" aria-label="当前小说章节" hidden></section>
         <div class="module-group module-group-utility">
           <button data-module="taskCenter" type="button"><span aria-hidden="true">◎</span>任务中心</button>
           <button data-module="settings" type="button"><span>⚙</span>设置</button>
@@ -206,137 +207,15 @@
     </section>
 
     <section class="review-workspace module-view" data-module-view="reviewCenter">
-      <section class="review-center-pane">
-        <section class="hero-panel">
-          <div>
-            <p id="reviewScopeMetric">审核中心</p>
-            <h2>待处理审核队列</h2>
-            <small>统一查看生成结果、拆解、设定、素材和任务诊断；具体审核仍跳转到原有工作区处理。</small>
-          </div>
-          <div class="hero-actions">
-            <span id="reviewCenterBadge" class="mini-badge">读取中</span>
-            <button id="reviewCenterRefreshButton" class="tool-action" type="button" title="刷新审核队列" aria-label="刷新审核队列"><span aria-hidden="true">↻</span><strong>刷新审核</strong></button>
-          </div>
-        </section>
-        <section id="reviewCenterSummary" class="review-summary-grid"></section>
-        <section class="review-center-layout">
-          <section class="panel review-queue-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">审核队列</p>
-                <h2>按优先级处理</h2>
-              </div>
-              <select id="reviewCenterFilter" class="filter-select">
-                <option value="all">全部类型</option>
-                <option value="output">生成结果</option>
-                <option value="breakdown">章节拆解</option>
-                <option value="setting">小说设定</option>
-                <option value="asset">视觉素材</option>
-                <option value="job">任务诊断</option>
-              </select>
-            </div>
-            <div id="reviewCenterList" class="review-center-list"></div>
-          </section>
-          <section class="panel review-guide-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">审核对象</p>
-                <h2>详情与历史</h2>
-              </div>
-            </div>
-            <div id="reviewObjectDetail" class="review-object-detail"></div>
-            <div class="review-object-head">
-              <div>
-                <p class="eyebrow">对象聚合</p>
-                <h2>按对象查看历史</h2>
-              </div>
-              <span id="reviewObjectGroupBadge" class="mini-badge">0 组</span>
-            </div>
-            <div id="reviewObjectGroups" class="review-object-groups"></div>
-            <div class="review-timeline-head">
-              <div>
-                <p class="eyebrow">审核时间线</p>
-                <h2>最近处理记录</h2>
-              </div>
-              <span id="reviewTimelineBadge" class="mini-badge">0 条</span>
-            </div>
-            <div class="review-timeline-tools">
-              <select id="reviewTimelineFilter" class="filter-select" aria-label="筛选审核时间线">
-                <option value="all">全部记录</option>
-                <option value="generated_output">生成结果</option>
-                <option value="chapter_breakdown">章节拆解</option>
-                <option value="setting">小说设定</option>
-                <option value="setting_scan">设定扫描</option>
-                <option value="visual_asset">视觉素材</option>
-              </select>
-              <select id="reviewTimelineRange" class="filter-select" aria-label="审核时间范围">
-                <option value="all">全部时间</option>
-                <option value="7d">最近 7 天</option>
-                <option value="30d">最近 30 天</option>
-                <option value="90d">最近 90 天</option>
-              </select>
-              <select id="reviewTimelineLimit" class="filter-select" aria-label="审核时间线记录数量">
-                <option value="40">最近 40 条</option>
-                <option value="20">最近 20 条</option>
-                <option value="80">最近 80 条</option>
-                <option value="100">最近 100 条</option>
-              </select>
-            </div>
-            <div id="reviewReasonStats" class="review-reason-stats"></div>
-            <div id="reviewTimelineList" class="review-timeline-list"></div>
-            <div id="reviewTimelineDetail" class="review-timeline-detail"></div>
-          </section>
-        </section>
-      </section>
+      <div id="reviewCenterApp" class="vue-workspace-host"></div>
     </section>
 
     <section class="task-workspace module-view" data-module-view="taskCenter">
-      <section class="task-center-pane">
-        <section class="hero-panel">
-          <div>
-            <p>任务中心</p>
-            <h2>生成、拆解与诊断任务</h2>
-            <small>集中查看任务状态、日志尾部和可重试诊断；任务执行仍由现有流程入口触发。</small>
-          </div>
-          <div class="hero-actions">
-            <span id="taskCenterBadge" class="mini-badge">读取中</span>
-            <button id="taskCenterRefreshButton" class="tool-action" type="button" title="刷新任务列表" aria-label="刷新任务列表"><span aria-hidden="true">↻</span><strong>刷新任务</strong></button>
-          </div>
-        </section>
-        <section id="taskCenterSummary" class="task-summary-grid"></section>
-        <section class="task-center-layout">
-          <section class="panel task-center-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">任务列表</p>
-                <h2>最近任务</h2>
-              </div>
-              <select id="taskCenterFilter" class="filter-select">
-                <option value="all">全部任务</option>
-                <option value="running">运行中</option>
-                <option value="waiting">等待处理</option>
-                <option value="failed">失败任务</option>
-                <option value="passed">已完成</option>
-              </select>
-            </div>
-            <div id="taskCenterJobs" class="jobs"></div>
-          </section>
-          <section class="panel task-detail-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">任务详情</p>
-                <h2>选中任务</h2>
-              </div>
-              <span id="taskDetailBadge" class="mini-badge">未选择</span>
-            </div>
-            <div id="taskDetail" class="task-detail-empty">选择左侧任务查看详情。</div>
-          </section>
-        </section>
-      </section>
+      <div id="taskCenterApp" class="vue-workspace-host"></div>
     </section>
 
     <section class="workbench module-view" data-module-view="workflow" data-workspace="novel">
-    <aside class="sidebar">
+    <aside id="workflowChapterSidebar" class="sidebar">
       <div class="side-head">
         <div>
           <h2>当前小说章节</h2>
@@ -363,7 +242,7 @@
           <small id="contextLine">章节由左侧列表选择，当前视图跟随所选章节刷新。</small>
         </div>
         <div class="hero-actions">
-          <button id="agentFocusButton" class="tool-action" type="button" title="查看流程助手建议" aria-label="查看流程助手建议"><span aria-hidden="true">></span><strong>流程助手</strong></button>
+          <button id="agentFocusButton" class="tool-action" type="button" title="打开章节属性与流程助手" aria-label="打开章节属性与流程助手" aria-controls="contextDrawer" aria-expanded="false"><span aria-hidden="true">›</span><strong>属性</strong></button>
         </div>
       </section>
 
@@ -464,7 +343,15 @@
       </section>
     </section>
 
-    <aside class="inspector">
+    <aside id="contextDrawer" class="inspector context-drawer" hidden aria-hidden="true" role="complementary" aria-labelledby="contextDrawerTitle">
+      <header class="context-drawer-header">
+        <div>
+          <p class="eyebrow">章节副信息</p>
+          <h2 id="contextDrawerTitle">属性与流程</h2>
+        </div>
+        <button id="contextDrawerCloseButton" class="icon-button" type="button" title="关闭侧栏" aria-label="关闭侧栏">×</button>
+      </header>
+      <div class="context-drawer-body">
       <section class="panel agent-compact" id="agentCompact">
         <div>
           <p class="eyebrow">当前建议</p>
@@ -528,7 +415,7 @@
           <button data-stage="status" type="button">刷新状态</button>
         </div>
       </details>
-
+      </div>
     </aside>
     </section>
 
@@ -688,186 +575,16 @@
     </section>
 
     <section class="settings-workspace module-view" data-module-view="settings">
-      <section class="settings-pane">
-        <section class="hero-panel">
-          <div>
-            <p>全局设置</p>
-            <h2>运行配置</h2>
-            <small>统一管理控制台、生成后端、模型接口和数据库连接；密钥只写入本地配置，不显示明文。</small>
-          </div>
-          <div class="hero-actions">
-            <button id="checkSettingsButton" class="tool-action" type="button" title="检查配置连接" aria-label="检查配置连接"><span aria-hidden="true">↻</span><strong>连接测试</strong></button>
-            <button id="saveConfigButton" class="tool-action" type="button" title="保存设置" aria-label="保存设置"><span aria-hidden="true">✓</span><strong>保存设置</strong></button>
-          </div>
-        </section>
-
-        <section class="settings-overview">
-          <section class="panel settings-source-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">配置来源</p>
-                <h2>写入位置与职责</h2>
-              </div>
-            </div>
-            <div id="settingsSourceList" class="settings-source-list"></div>
-          </section>
-
-          <section class="panel settings-health-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">连接测试</p>
-                <h2>当前配置状态</h2>
-              </div>
-              <span id="settingsHealthBadge" class="mini-badge">未测试</span>
-            </div>
-            <div id="settingsHealthList" class="settings-health-list">
-              <div class="settings-empty">点击“连接测试”检查 PostgreSQL、当前图片后端、API Key、输出目录和模型配置。</div>
-            </div>
-          </section>
-        </section>
-
-        <section class="settings-grid">
-          <section class="panel settings-backend-panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">图片生成</p>
-                <h2>生成后端</h2>
-              </div>
-              <span id="settingsBackendBadge" class="mini-badge">待检查</span>
-            </div>
-            <label>后端类型
-              <select id="imageBackend">
-                <option value="direct_api">直连图片 API（默认）</option>
-                <option value="comfyui">ComfyUI（本地模型）</option>
-              </select>
-            </label>
-            <small id="backendModeNote" class="settings-note">直连图片 API，无需启动独立生成服务。</small>
-            <fieldset id="comfySettingsFields" class="backend-optional-fields">
-              <legend>ComfyUI 可选配置</legend>
-              <label>ComfyUI 地址<input id="comfyUrl" autocomplete="off"></label>
-              <label>ComfyUI 根目录<input id="comfyRoot" autocomplete="off"></label>
-              <label>Checkpoint 文件名<input id="comfyCheckpoint" placeholder="例如：comic_model.safetensors" autocomplete="off"></label>
-              <div class="comfy-template-grid">
-                <label>LoRA 文件名<input id="comfyLoraName" placeholder="可留空" autocomplete="off"></label>
-                <label>LoRA 模型权重<input id="comfyLoraStrengthModel" type="number" step="0.05" value="1"></label>
-                <label>LoRA 文本权重<input id="comfyLoraStrengthClip" type="number" step="0.05" value="1"></label>
-              </div>
-              <div class="comfy-template-grid">
-                <label>ControlNet 文件名<input id="comfyControlnetName" placeholder="可留空" autocomplete="off"></label>
-                <label>ControlNet 强度<input id="comfyControlnetStrength" type="number" min="0" step="0.05" value="1"></label>
-                <label>开始百分比<input id="comfyControlnetStart" type="number" min="0" max="0.99" step="0.05" value="0"></label>
-                <label>结束百分比<input id="comfyControlnetEnd" type="number" min="0.01" max="1" step="0.05" value="1"></label>
-              </div>
-              <div class="comfy-template-grid">
-                <label>采样步数<input id="comfySteps" type="number" min="1" step="1" value="28"></label>
-                <label>CFG<input id="comfyCfg" type="number" min="0.1" step="0.1" value="7"></label>
-                <label>采样器<input id="comfySampler" value="dpmpp_2m" autocomplete="off"></label>
-                <label>调度器<input id="comfyScheduler" value="karras" autocomplete="off"></label>
-              </div>
-              <small class="settings-note">工作流会使用这里的 Checkpoint、采样参数和可选 LoRA。只有分镜存在参考图且配置了 ControlNet 时，才会生成 ControlNet 节点链。</small>
-            </fieldset>
-            <label>输出目录<input id="outputRoot" autocomplete="off"></label>
-            <div class="backend-actions">
-              <button id="checkBackendButton" type="button">检查后端</button>
-              <button id="startBackendButton" class="primary" type="button">无需启动</button>
-            </div>
-            <div id="backendDiagnostics" class="backend-diagnostics">尚未检查生成后端。</div>
-          </section>
-
-          <section class="panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">文本模型</p>
-                <h2>小说处理</h2>
-              </div>
-              <span id="settingsTextKeyBadge" class="mini-badge">未配置</span>
-            </div>
-            <label>小说处理模型<input id="textModel" autocomplete="off"></label>
-            <small class="settings-note">用于小说导入增强、章节细读、全书设定扫描和提示词整理。</small>
-            <label>长文本超时秒数<input id="textModelTimeout" type="number" min="30" step="30" autocomplete="off"></label>
-            <label class="settings-toggle">
-              <input id="textModelStream" type="checkbox">
-              <span>启用流式响应</span>
-            </label>
-            <small class="settings-note">长小说处理建议 300 秒以上；流式响应可以减少模型生成期间的读取超时。</small>
-            <label>小说处理接口地址<input id="textBaseUrl" autocomplete="off"></label>
-            <label>小说处理 API Key<input id="textApiKey" type="password" placeholder="留空表示不修改"></label>
-            <small id="textApiKeyDetail" class="settings-note">密钥保存在 text.env，页面只显示是否已配置。</small>
-            <button id="testTextModelButton" type="button">测试小说处理模型</button>
-            <div id="textModelTestResult" class="model-test-result">尚未测试小说处理模型。</div>
-          </section>
-
-          <section class="panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">图片模型</p>
-                <h2>图片生成</h2>
-              </div>
-              <span id="settingsImageKeyBadge" class="mini-badge">未配置</span>
-            </div>
-            <label>图片生成模型<input id="imageModel" autocomplete="off"></label>
-            <small class="settings-note">直连 API 使用此模型；ComfyUI 本地模型由工作流节点选择，仅云端图片节点使用此项。</small>
-            <label>图片生成质量
-              <select id="imageQuality">
-                <option value="auto">自动</option>
-                <option value="low">低（更快）</option>
-                <option value="medium">中</option>
-                <option value="high">高</option>
-              </select>
-            </label>
-            <label>图片生成接口地址<input id="imageBaseUrl" autocomplete="off"></label>
-            <label>图片生成 API Key<input id="imageApiKey" type="password" placeholder="留空表示不修改"></label>
-            <small id="imageApiKeyDetail" class="settings-note">密钥保存在 image.env，页面只显示是否已配置。</small>
-            <button id="testImageModelButton" type="button">测试图片生成模型</button>
-            <div id="imageModelTestResult" class="model-test-result">尚未测试图片生成模型。</div>
-          </section>
-
-          <section class="panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">PostgreSQL</p>
-                <h2>数据库</h2>
-              </div>
-              <span id="settingsDatabaseBadge" class="mini-badge">待检查</span>
-            </div>
-            <label>PostgreSQL 地址<input id="databaseUrl" type="password" autocomplete="off"></label>
-            <small id="databaseDetail" class="settings-note">作品、章节、审核状态和任务索引使用 PostgreSQL 保存。</small>
-          </section>
-
-          <section class="panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">生效配置</p>
-                <h2>当前小说</h2>
-              </div>
-            </div>
-            <div id="effectiveProjectConfig" class="effective-config">
-              当前小说使用全局配置。
-            </div>
-          </section>
-
-        </section>
-      </section>
+      <div id="settingsApp" class="vue-workspace-host"></div>
     </section>
     </section>
   </main>
 
-  <div id="appToastStack" class="app-toast-stack" aria-live="polite" aria-atomic="true"></div>
-  <div id="appDialog" class="app-dialog-overlay hidden" role="presentation">
-    <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogMessage">
-      <div class="app-dialog-head">
-        <span id="appDialogKind" class="app-dialog-kind">提示</span>
-        <h2 id="appDialogTitle">确认操作</h2>
-      </div>
-      <p id="appDialogMessage"></p>
-      <input id="appDialogInput" class="hidden" autocomplete="off">
-      <div class="app-dialog-actions">
-        <button id="appDialogCancel" type="button">取消</button>
-        <button id="appDialogConfirm" class="primary" type="button">确认</button>
-      </div>
-    </section>
-  </div>
+  <div id="appToastStack" aria-live="polite" aria-atomic="true"></div>
+  <div id="appDialogHost"></div>
 
-  <script src="/static/app.js?v=20260901-stitch-v1"></script>
+  <link rel="stylesheet" href="/static/vue/console-ui.css?v=20260928-vue-baseline">
+  <script src="/static/vue/console-ui.js?v=20260928-vue-baseline"></script>
+  <script src="/static/app.js?v=20260928-vue-baseline"></script>
 </body>
 </html>

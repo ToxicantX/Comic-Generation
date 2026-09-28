@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>漫画流水线</title>
+  <link rel="stylesheet" href="./splash.css">
+</head>
+<body>
+  <main class="startup-shell">
+    <header class="startup-brand">
+      <span class="brand-mark" aria-hidden="true">漫</span>
+      <div>
+        <h1>漫画流水线</h1>
+        <p>Comic Pipeline Desktop</p>
+      </div>
+    </header>
+    <section class="startup-content" aria-live="polite">
+      <div class="startup-status-row">
+        <span id="statusDot" class="status-dot running" aria-hidden="true"></span>
+        <div>
+          <p class="eyebrow">桌面工作台</p>
+          <h2 id="statusTitle">正在准备工作区</h2>
+        </div>
+      </div>
+      <p id="statusMessage">正在检查漫画流水线后台...</p>
+      <pre id="statusDetail" class="status-detail hidden"></pre>
+      <div id="failureActions" class="failure-actions hidden">
+        <button id="retryButton" class="primary" type="button">重新检查</button>
+        <button id="logButton" type="button">查看桌面日志</button>
+      </div>
+    </section>
+    <footer>
+      <span id="runtimeLabel">Windows 桌面版</span>
+      <span>后台任务与窗口生命周期相互独立</span>
+    </footer>
+  </main>
+  <script src="./splash.js"></script>
+</body>
+</html>

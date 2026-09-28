@@ -1,0 +1,59 @@
+appId: com.wsxcant.comicgeneration
+productName: Comic Generation
+asar: true
+asarUnpack:
+  - node_modules/**
+
+directories:
+  output: dist/windows
+
+files:
+  - package.json
+  - desktop/*.cjs
+  - desktop/*.html
+  - desktop/*.css
+  - desktop/*.js
+  - "!desktop/tests/**"
+
+extraResources:
+  - from: build/runtime/python
+    to: runtime/python
+    filter:
+      - "**/*"
+  - from: build/runtime/app
+    to: runtime/app
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  forceCodeSigning: false
+  signAndEditExecutable: true
+
+nsis:
+  artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
+
+publish:
+  - provider: github
+    owner: ToxicantX
+    repo: Comic-Generation
+    releaseType: draft
+    publishAutoUpdate: true
+
+generateUpdatesFilesForAllChannels: false

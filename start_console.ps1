@@ -11,9 +11,23 @@ $server = Join-Path $root "console\server.py"
 $configPath = Join-Path $root "config\.env"
 $logDir = Join-Path $root "logs"
 $postgresScript = Join-Path $root "start_postgres.ps1"
+$frontendBundle = Join-Path $root "console\static\vue\console-ui.js"
 
 if (-not (Test-Path -LiteralPath $server)) {
     throw "Console server not found: $server"
+}
+
+if (-not (Test-Path -LiteralPath $frontendBundle)) {
+    Write-Host "Building Vue desktop interface..."
+    Push-Location $root
+    try {
+        npm run frontend:build
+        if ($LASTEXITCODE -ne 0) {
+            throw "Frontend build failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 function Read-ComicEnv {

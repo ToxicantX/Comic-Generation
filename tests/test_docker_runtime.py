@@ -15,6 +15,17 @@ class DockerRuntimeTest(unittest.TestCase):
         self.assertIn("fonts-noto-cjk", dockerfile)
         self.assertIn("/usr/local/bin/powershell", dockerfile)
 
+    def test_console_image_builds_vue_assets_before_python_runtime(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("FROM node:22-slim AS frontend-build", dockerfile)
+        self.assertIn("COPY scripts/assert_frontend_build.mjs", dockerfile)
+        self.assertIn("RUN npm ci && npm run frontend:build", dockerfile)
+        self.assertIn(
+            "COPY --from=frontend-build /app/console/static/vue /app/console/static/vue",
+            dockerfile,
+        )
+
     def test_default_compose_has_no_comfyui_mount_or_port_dependency(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
@@ -50,6 +61,7 @@ class DockerRuntimeTest(unittest.TestCase):
 
         self.assertIn("COMIC_PIPELINE_IMAGE_BACKEND", script)
         self.assertIn('if ($imageBackend -ne "comfyui")', script)
+        self.assertIn('npm run frontend:build', script)
 
 
 if __name__ == "__main__":

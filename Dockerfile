@@ -1,3 +1,12 @@
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app
+
+COPY package.json package-lock.json vite.config.ts tsconfig.frontend.json /app/
+COPY console/frontend /app/console/frontend
+COPY scripts/assert_frontend_build.mjs /app/scripts/assert_frontend_build.mjs
+RUN npm ci && npm run frontend:build
+
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -21,6 +30,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . /app
+COPY --from=frontend-build /app/console/static/vue /app/console/static/vue
 
 EXPOSE 8199
 

@@ -42,6 +42,19 @@ const state = {
   generationBackend: null,
   settingsHealth: null,
   settingsSummary: null,
+  settingsModelOptions: { text: [], image: [] },
+  settingsModelListMessages: { text: "", image: "" },
+  settingsModelTestResults: { text: null, image: null },
+  settingsActivity: {
+    saving: false,
+    checkingHealth: false,
+    checkingBackend: false,
+    startingBackend: false,
+    fetchingModels: { text: false, image: false },
+    testingModels: { text: false, image: false },
+  },
+  desktopInfo: null,
+  desktopUpdate: null,
   previewPageId: "",
   settingPromptRefreshTimer: null,
   statusRefreshInFlight: false,
@@ -50,32 +63,118 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
-const nativeAlert = window.alert.bind(window);
 const nativeConfirm = window.confirm.bind(window);
 const nativePrompt = window.prompt.bind(window);
+let removeDesktopUpdateListener = null;
 
 function notify(message, type = "info", title = "提示") {
-  const stack = $("appToastStack");
-  if (!stack) {
-    nativeAlert(String(message || ""));
+  const notification = { message: String(message || ""), type, title };
+  if (typeof window.comicNotify === "function") {
+    window.comicNotify(notification);
     return;
   }
-  const toast = document.createElement("div");
-  toast.className = `app-toast ${type}`;
-  const content = document.createElement("div");
-  const heading = document.createElement("strong");
-  heading.textContent = title;
-  const body = document.createElement("p");
-  body.textContent = String(message || "");
-  const close = document.createElement("button");
-  close.type = "button";
-  close.setAttribute("aria-label", "关闭提示");
-  close.textContent = "×";
-  content.append(heading, body);
-  toast.append(content, close);
-  close.addEventListener("click", () => toast.remove());
-  stack.appendChild(toast);
-  window.setTimeout(() => toast.remove(), type === "error" ? 7000 : 4200);
+  window.__comicPendingNotifications = window.__comicPendingNotifications || [];
+  window.__comicPendingNotifications.push(notification);
+  if (window.__comicPendingNotifications.length > 20) window.__comicPendingNotifications.shift();
+}
+
+async function initializeDesktopIntegration() {
+  if (!window.comicDesktop?.getInfo) return null;
+  if (state.desktopInfo) return state.desktopInfo;
+  try {
+    if (!removeDesktopUpdateListener && window.comicDesktop.onUpdateState) {
+      removeDesktopUpdateListener = window.comicDesktop.onUpdateState((updateState) => {
+        state.desktopUpdate = updateState;
+        renderSettingsView();
+      });
+    }
+    state.desktopInfo = await window.comicDesktop.getInfo();
+    if (window.comicDesktop.getUpdateState) {
+      try {
+        state.desktopUpdate = await window.comicDesktop.getUpdateState();
+      } catch {
+        state.desktopUpdate = null;
+      }
+    }
+    renderSettingsView();
+    return state.desktopInfo;
+  } catch (error) {
+    console.warn("Desktop integration unavailable", error);
+    return null;
+  }
+}
+
+async function checkDesktopUpdate() {
+  if (!window.comicDesktop?.checkForUpdates) return;
+  try {
+    state.desktopUpdate = await window.comicDesktop.checkForUpdates();
+    renderSettingsView();
+  } catch {
+    notify("更新检查失败，请稍后重试。", "error", "软件更新");
+  }
+}
+
+async function installDesktopUpdate() {
+  if (!window.comicDesktop?.installUpdate) return;
+  const confirmed = await confirmDialog("应用将安全停止本地服务并重启完成升级。未保存的输入不会自动保存。", {
+    title: "重启并升级",
+    kind: "软件更新",
+    confirmText: "立即重启",
+  });
+  if (!confirmed) return;
+  try {
+    await window.comicDesktop.installUpdate();
+  } catch {
+    notify("升级程序未能启动，请重新检查更新后再试。", "error", "软件更新");
+  }
+}
+
+async function selectDesktopNovelFile() {
+  if (!window.comicDesktop?.selectNovelFile || state.desktopInfo?.runtimeMode !== "local") return;
+  const input = $("novelFile");
+  const status = $("novelFileStatus");
+  input.disabled = true;
+  if (status) status.textContent = "正在选择小说文件...";
+  try {
+    const result = await window.comicDesktop.selectNovelFile();
+    if (result.canceled) {
+      if (status) status.textContent = "未选择文件";
+      return;
+    }
+    setValue("novelPath", result.file.path);
+    if (!$("projectTitle").value.trim()) setValue("projectTitle", fileStem(result.file.name));
+    if (!$("projectSlug").value.trim()) setValue("projectSlug", slugFromFileName(result.file.name));
+    if (status) status.textContent = `已选择：${result.file.name}`;
+    state.importPreview = null;
+    state.latestImportJobId = "";
+    renderImportPreview(null, result.file.name);
+    renderChapterImportPreview();
+    renderImportResultPanel();
+    renderSettingsView();
+  } catch (error) {
+    if (status) status.textContent = error.message || "小说文件选择失败";
+    window.alert(error.message || "小说文件选择失败");
+  } finally {
+    input.disabled = false;
+  }
+}
+
+async function openDesktopDirectory(key) {
+  try {
+    const result = await window.comicDesktop?.openApprovedDirectory(key);
+    if (result && !result.opened) throw new Error(result.error || "目录打开失败");
+  } catch (error) {
+    window.alert(error.message || "目录打开失败");
+  }
+}
+
+function notifyDesktopJobTransition(job, previousState) {
+  if (!previousState || !document.hidden || !window.comicDesktop?.showNotification) return;
+  if (!job || !["passed", "failed", "partial", "cancelled", "interrupted"].includes(job.status)) return;
+  window.comicDesktop.showNotification({
+    title: `${stageLabel(job.stage)} ${statusText(job.status)}`,
+    body: String(job.label || "漫画流水线任务状态已更新").slice(0, 500),
+  }).catch((error) => console.warn("Desktop notification failed", error));
 }
 
 function showAppDialog({
@@ -87,50 +186,12 @@ function showAppDialog({
   prompt = false,
   defaultValue = "",
 } = {}) {
-  const overlay = $("appDialog");
-  if (!overlay) {
-    if (prompt) return Promise.resolve(nativePrompt(message, defaultValue));
-    return Promise.resolve(nativeConfirm(message));
+  const options = { title, message, kind, confirmText, cancelText, prompt, defaultValue };
+  if (typeof window.comicDialog === "function") {
+    return window.comicDialog(options);
   }
-  const titleEl = $("appDialogTitle");
-  const kindEl = $("appDialogKind");
-  const messageEl = $("appDialogMessage");
-  const inputEl = $("appDialogInput");
-  const confirmEl = $("appDialogConfirm");
-  const cancelEl = $("appDialogCancel");
-  titleEl.textContent = title;
-  kindEl.textContent = kind;
-  messageEl.textContent = message;
-  confirmEl.textContent = confirmText;
-  cancelEl.textContent = cancelText;
-  inputEl.classList.toggle("hidden", !prompt);
-  inputEl.value = prompt ? defaultValue : "";
-  overlay.classList.remove("hidden");
-  return new Promise((resolve) => {
-    const cleanup = (value) => {
-      overlay.classList.add("hidden");
-      confirmEl.removeEventListener("click", onConfirm);
-      cancelEl.removeEventListener("click", onCancel);
-      overlay.removeEventListener("click", onOverlay);
-      document.removeEventListener("keydown", onKeyDown);
-      resolve(value);
-    };
-    const onConfirm = () => cleanup(prompt ? inputEl.value : true);
-    const onCancel = () => cleanup(prompt ? null : false);
-    const onOverlay = (event) => {
-      if (event.target === overlay) onCancel();
-    };
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") onCancel();
-      if (event.key === "Enter" && (prompt || document.activeElement !== cancelEl)) onConfirm();
-    };
-    confirmEl.addEventListener("click", onConfirm);
-    cancelEl.addEventListener("click", onCancel);
-    overlay.addEventListener("click", onOverlay);
-    document.addEventListener("keydown", onKeyDown);
-    if (prompt) inputEl.focus();
-    else confirmEl.focus();
-  });
+  if (prompt) return Promise.resolve(nativePrompt(message, defaultValue));
+  return Promise.resolve(nativeConfirm(message));
 }
 
 function confirmDialog(message, options = {}) {
@@ -800,39 +861,12 @@ async function loadConfig() {
   state.config = await api("/api/config");
   await loadSettingsSummary();
   const c = state.config.config;
-  setValue("imageBackend", c.COMIC_PIPELINE_IMAGE_BACKEND || "direct_api");
-  setValue("comfyUrl", c.COMIC_PIPELINE_COMFY_URL);
-  setValue("comfyRoot", c.COMIC_PIPELINE_COMFY_ROOT);
-  setValue("comfyCheckpoint", c.COMIC_PIPELINE_COMFY_CHECKPOINT || "");
-  setValue("comfyLoraName", c.COMIC_PIPELINE_COMFY_LORA_NAME || "");
-  setValue("comfyLoraStrengthModel", c.COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL || "1.0");
-  setValue("comfyLoraStrengthClip", c.COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP || "1.0");
-  setValue("comfyControlnetName", c.COMIC_PIPELINE_COMFY_CONTROLNET_NAME || "");
-  setValue("comfyControlnetStrength", c.COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH || "1.0");
-  setValue("comfyControlnetStart", c.COMIC_PIPELINE_COMFY_CONTROLNET_START || "0.0");
-  setValue("comfyControlnetEnd", c.COMIC_PIPELINE_COMFY_CONTROLNET_END || "1.0");
-  setValue("comfySteps", c.COMIC_PIPELINE_COMFY_STEPS || "28");
-  setValue("comfyCfg", c.COMIC_PIPELINE_COMFY_CFG || "7.0");
-  setValue("comfySampler", c.COMIC_PIPELINE_COMFY_SAMPLER || "dpmpp_2m");
-  setValue("comfyScheduler", c.COMIC_PIPELINE_COMFY_SCHEDULER || "karras");
   setValue("novelPath", c.COMIC_PIPELINE_NOVEL_PATH);
-  setValue("outputRoot", c.COMIC_PIPELINE_OUTPUT_ROOT);
-  setValue("databaseUrl", c.COMIC_PIPELINE_DATABASE_URL);
-  setValue("textModel", c.COMIC_PIPELINE_TEXT_MODEL);
-  setValue("textModelTimeout", c.COMIC_PIPELINE_TEXT_MODEL_TIMEOUT || "300");
-  if ($("textModelStream")) {
-    $("textModelStream").checked = String(c.COMIC_PIPELINE_TEXT_MODEL_STREAM || "true").toLowerCase() !== "false";
-  }
-  setValue("imageModel", c.COMIC_PIPELINE_IMAGE_MODEL);
-  setValue("imageQuality", c.COMIC_PIPELINE_IMAGE_QUALITY || "auto");
   setValue("defaultPages", c.COMIC_PIPELINE_DEFAULT_PAGES);
   setValue("encoding", c.COMIC_PIPELINE_ENCODING);
-  setValue("textBaseUrl", state.config.text?.OPENAI_BASE_URL || "");
-  setValue("imageBaseUrl", state.config.image?.OPENAI_BASE_URL || "");
   state.activeProject = state.config.projects?.active || c.COMIC_PIPELINE_ACTIVE_PROJECT || "";
   $("keyMetric").textContent = state.config.image?.OPENAI_API_KEY_CONFIGURED ? "已配置" : "未配置";
-  updateImageBackendControls();
-  updateSettingsBadges();
+  renderSettingsView();
 }
 
 async function loadSettingsSummary() {
@@ -844,74 +878,87 @@ async function loadSettingsSummary() {
   }
 }
 
-async function saveConfig() {
-  setButtons(true);
-  const payload = settingsPayloadFromForm();
+function renderSettingsView() {
+  if (!window.comicSettings || !state.config) return;
+  window.comicSettings.update({
+    config: state.config,
+    settingsSummary: state.settingsSummary,
+    settingsHealth: state.settingsHealth,
+    generationBackend: state.generationBackend,
+    novelPath: $("novelPath")?.value || state.config.config?.COMIC_PIPELINE_NOVEL_PATH || "",
+    defaultPages: $("defaultPages")?.value || state.config.config?.COMIC_PIPELINE_DEFAULT_PAGES || "8",
+    encoding: $("encoding")?.value || state.config.config?.COMIC_PIPELINE_ENCODING || "utf-8",
+    modelOptions: state.settingsModelOptions,
+    modelListMessages: state.settingsModelListMessages,
+    modelTestResults: state.settingsModelTestResults,
+    activity: state.settingsActivity,
+    desktopInfo: state.desktopInfo,
+    desktopUpdate: state.desktopUpdate,
+  });
+}
+
+async function saveConfig(payload) {
+  if (!payload) return;
+  state.settingsActivity.saving = true;
+  renderSettingsView();
   try {
-    state.config = await api("/api/config", { method: "POST", body: JSON.stringify(payload) });
+    const desktopSecrets = {};
+    let requestPayload = payload;
+    if (state.desktopInfo?.runtimeMode === "local" && window.comicDesktop?.saveProviderSecrets) {
+      if (payload.text?.OPENAI_API_KEY) desktopSecrets.textApiKey = payload.text.OPENAI_API_KEY;
+      if (payload.image?.OPENAI_API_KEY) desktopSecrets.imageApiKey = payload.image.OPENAI_API_KEY;
+      requestPayload = {
+        ...payload,
+        text: { ...payload.text },
+        image: { ...payload.image },
+      };
+      delete requestPayload.text.OPENAI_API_KEY;
+      delete requestPayload.image.OPENAI_API_KEY;
+    }
+    state.config = await api("/api/config", { method: "POST", body: JSON.stringify(requestPayload) });
+    if (Object.keys(desktopSecrets).length > 0) {
+      await window.comicDesktop.saveProviderSecrets(desktopSecrets);
+      state.config = await api("/api/config");
+    }
     await loadSettingsSummary();
-    $("textApiKey").value = "";
-    $("imageApiKey").value = "";
     state.settingsHealth = null;
     await Promise.all([loadHealth(), loadProjects()]);
     await loadEpisodes();
     await loadEpisode(state.selectedEpisode);
-    updateSettingsBadges();
     window.alert("设置已保存。");
   } catch (error) {
     window.alert(error.message || "设置保存失败，原配置已保留。");
     await loadConfig();
   } finally {
-    setButtons(false);
+    state.settingsActivity.saving = false;
+    renderSettingsView();
   }
 }
 
-function settingsPayloadFromForm() {
-  return {
-    config: {
-      COMIC_PIPELINE_IMAGE_BACKEND: $("imageBackend").value,
-      COMIC_PIPELINE_COMFY_URL: $("comfyUrl").value,
-      COMIC_PIPELINE_COMFY_ROOT: $("comfyRoot").value,
-      COMIC_PIPELINE_COMFY_CHECKPOINT: $("comfyCheckpoint").value,
-      COMIC_PIPELINE_COMFY_LORA_NAME: $("comfyLoraName").value,
-      COMIC_PIPELINE_COMFY_LORA_STRENGTH_MODEL: String(getFloat("comfyLoraStrengthModel", 1)),
-      COMIC_PIPELINE_COMFY_LORA_STRENGTH_CLIP: String(getFloat("comfyLoraStrengthClip", 1)),
-      COMIC_PIPELINE_COMFY_CONTROLNET_NAME: $("comfyControlnetName").value,
-      COMIC_PIPELINE_COMFY_CONTROLNET_STRENGTH: String(Math.max(getFloat("comfyControlnetStrength", 1), 0)),
-      COMIC_PIPELINE_COMFY_CONTROLNET_START: String(Math.min(Math.max(getFloat("comfyControlnetStart", 0), 0), 0.99)),
-      COMIC_PIPELINE_COMFY_CONTROLNET_END: String(Math.min(Math.max(getFloat("comfyControlnetEnd", 1), 0.01), 1)),
-      COMIC_PIPELINE_COMFY_STEPS: String(Math.max(getInt("comfySteps", 28), 1)),
-      COMIC_PIPELINE_COMFY_CFG: String(Math.max(getFloat("comfyCfg", 7), 0.1)),
-      COMIC_PIPELINE_COMFY_SAMPLER: $("comfySampler").value,
-      COMIC_PIPELINE_COMFY_SCHEDULER: $("comfyScheduler").value,
-      COMIC_PIPELINE_NOVEL_PATH: $("novelPath").value,
-      COMIC_PIPELINE_OUTPUT_ROOT: $("outputRoot").value,
-      COMIC_PIPELINE_DATABASE_URL: $("databaseUrl").value,
-      COMIC_PIPELINE_TEXT_ENV_PATH: state.config?.config?.COMIC_PIPELINE_TEXT_ENV_PATH || "",
-      COMIC_PIPELINE_IMAGE_ENV_PATH: state.config?.config?.COMIC_PIPELINE_IMAGE_ENV_PATH || "",
-      COMIC_PIPELINE_TEXT_MODEL: $("textModel").value,
-      COMIC_PIPELINE_TEXT_MODEL_TIMEOUT: String(Math.max(getInt("textModelTimeout", 300), 30)),
-      COMIC_PIPELINE_TEXT_MODEL_STREAM: $("textModelStream")?.checked ? "true" : "false",
-      COMIC_PIPELINE_IMAGE_MODEL: $("imageModel").value,
-      COMIC_PIPELINE_IMAGE_QUALITY: $("imageQuality").value,
-      COMIC_PIPELINE_DEFAULT_PAGES: $("defaultPages").value,
-      COMIC_PIPELINE_ENCODING: $("encoding").value,
-      COMIC_PIPELINE_ACTIVE_PROJECT: state.activeProject || "sou_shen_ji",
-    },
-    text: {
-      OPENAI_BASE_URL: $("textBaseUrl").value,
-      OPENAI_API_KEY: $("textApiKey").value,
-    },
-    image: {
-      OPENAI_BASE_URL: $("imageBaseUrl").value,
-      OPENAI_API_KEY: $("imageApiKey").value,
-    },
-  };
+async function fetchModelList(request) {
+  const target = request?.target;
+  if (!['text', 'image'].includes(target)) return;
+  state.settingsActivity.fetchingModels[target] = true;
+  state.settingsModelListMessages[target] = "正在获取模型列表...";
+  renderSettingsView();
+  try {
+    const result = await api("/api/settings/models", { method: "POST", body: JSON.stringify(request) });
+    if (!result.ok) throw new Error(result.message || "获取模型列表失败，可手动输入模型名称。");
+    state.settingsModelOptions[target] = Array.isArray(result.models) ? result.models : [];
+    state.settingsModelListMessages[target] = result.message || `已获取 ${state.settingsModelOptions[target].length} 个模型。`;
+  } catch (error) {
+    state.settingsModelOptions[target] = [];
+    state.settingsModelListMessages[target] = error.message || "获取模型列表失败，可手动输入模型名称。";
+  } finally {
+    state.settingsActivity.fetchingModels[target] = false;
+    renderSettingsView();
+  }
 }
 
-async function testModel(target) {
-  const liveImageTest = target === "image" && currentImageBackend() === "direct_api";
-  if (liveImageTest) {
+async function testModel(request) {
+  const target = request?.target;
+  if (!['text', 'image'].includes(target) || !request.config) return;
+  if (request.live) {
     const ok = await confirmDialog("将调用图片模型生成一张低质量测试图，会消耗少量图片额度。测试图只用于验证响应，不会保存到素材库。", {
       title: "测试图片生成业务",
       kind: "实际调用",
@@ -919,64 +966,43 @@ async function testModel(target) {
     });
     if (!ok) return;
   }
-  const resultBox = target === "text" ? $("textModelTestResult") : $("imageModelTestResult");
-  setButtons(true);
-  if (resultBox) {
-    resultBox.className = "model-test-result running";
-    resultBox.textContent = target === "text"
-      ? "正在测试小说处理模型..."
-      : (liveImageTest ? "正在调用图片生成模型..." : "正在检查 ComfyUI 本地模型环境...");
-  }
+  state.settingsActivity.testingModels[target] = true;
+  state.settingsModelTestResults[target] = null;
+  renderSettingsView();
   try {
-    state.config = await api("/api/config", { method: "POST", body: JSON.stringify(settingsPayloadFromForm()) });
-    $("textApiKey").value = "";
-    $("imageApiKey").value = "";
+    state.config = await api("/api/config", { method: "POST", body: JSON.stringify(request.config) });
     await loadSettingsSummary();
     await loadHealth();
     const result = await api("/api/settings/test-model", {
       method: "POST",
       body: JSON.stringify({
         target,
-        timeout: target === "text" ? Math.min(Math.max(getInt("textModelTimeout", 300), 30), 120) : 180,
-        live: liveImageTest,
+        timeout: request.timeout,
+        live: Boolean(request.live),
       }),
     });
     renderModelTestResult(target, result);
-    updateSettingsBadges();
   } catch (error) {
     renderModelTestResult(target, { ok: false, message: error.message || "模型测试失败" });
   } finally {
-    setButtons(false);
+    state.settingsActivity.testingModels[target] = false;
+    renderSettingsView();
   }
 }
 
 function renderModelTestResult(target, result) {
-  const box = target === "text" ? $("textModelTestResult") : $("imageModelTestResult");
-  if (!box) return;
-  box.className = `model-test-result ${result?.ok ? "ok" : "bad"}`;
-  const detail = result?.detail?.elapsed_seconds
-    ? `耗时 ${result.detail.elapsed_seconds} 秒`
-    : (result?.dry_run ? "未生成图片" : "");
-  box.innerHTML = `
-    <strong>${escapeHtml(result?.ok ? "测试通过" : "测试失败")}</strong>
-    <span>${escapeHtml(result?.message || "-")}</span>
-    ${detail ? `<small>${escapeHtml(detail)}</small>` : ""}
-  `;
+  state.settingsModelTestResults[target] = result;
+  renderSettingsView();
 }
 
 async function checkSettingsHealth() {
-  setButtons(true);
-  const badge = $("settingsHealthBadge");
-  if (badge) {
-    badge.textContent = "检查中";
-    badge.className = "mini-badge agent-state-running";
-  }
+  state.settingsActivity.checkingHealth = true;
+  renderSettingsView();
   try {
     state.settingsHealth = await api("/api/settings/health-check", {
       method: "POST",
       body: JSON.stringify({}),
     });
-    renderSettingsHealth();
     await loadHealth();
   } catch (error) {
     state.settingsHealth = {
@@ -988,9 +1014,9 @@ async function checkSettingsHealth() {
         message: error.message || "连接测试失败",
       }],
     };
-    renderSettingsHealth();
   } finally {
-    setButtons(false);
+    state.settingsActivity.checkingHealth = false;
+    renderSettingsView();
   }
 }
 
@@ -1014,38 +1040,38 @@ async function loadHealth() {
 }
 
 async function checkGenerationBackend() {
-  setButtons(true);
+  state.settingsActivity.checkingBackend = true;
+  renderSettingsView();
   try {
     state.generationBackend = await api("/api/generation-backend");
-    renderGenerationBackendDiagnostics();
     await loadHealth();
   } catch (error) {
-    const box = $("backendDiagnostics");
-    if (box) box.textContent = error.message || "生成后端检查失败";
+    state.generationBackend = { ok: false, message: error.message || "生成后端检查失败" };
   } finally {
-    setButtons(false);
+    state.settingsActivity.checkingBackend = false;
+    renderSettingsView();
   }
 }
 
-async function startGenerationBackend() {
+async function startGenerationBackend(request = { wait_seconds: 20 }) {
   if (currentImageBackend() !== "comfyui") return;
-  const ok = window.confirm("尝试启动生成后端？这会使用设置中的 ComfyUI 根目录和端口。");
+  const ok = await confirmDialog("尝试启动生成后端？这会使用设置中的 ComfyUI 根目录和端口。");
   if (!ok) return;
-  setButtons(true);
+  state.settingsActivity.startingBackend = true;
+  renderSettingsView();
   try {
     state.generationBackend = await api("/api/generation-backend/start", {
       method: "POST",
-      body: JSON.stringify({ wait_seconds: 20 }),
+      body: JSON.stringify(request),
     });
-    renderGenerationBackendDiagnostics(state.generationBackend.diagnostics || state.generationBackend);
     await loadHealth();
     window.alert(state.generationBackend.message || "生成后端启动流程已执行");
   } catch (error) {
-    const box = $("backendDiagnostics");
-    if (box) box.textContent = error.message || "生成后端启动失败";
+    state.generationBackend = { ok: false, message: error.message || "生成后端启动失败" };
     window.alert(error.message || "生成后端启动失败");
   } finally {
-    setButtons(false);
+    state.settingsActivity.startingBackend = false;
+    renderSettingsView();
   }
 }
 
@@ -1185,6 +1211,7 @@ async function loadJobs() {
   state.jobs = data.jobs || [];
   const latest = state.jobs[0];
   state.lastJobState = latest ? `${latest.id}:${latest.status}` : "";
+  if (latest && state.lastJobState !== previousLatestState) notifyDesktopJobTransition(latest, previousLatestState);
   $("jobMetric").textContent = latest ? `${latest.label} ${statusText(latest.status)}` : "无";
   renderJobs();
   renderImportResultPanel();
@@ -1256,10 +1283,10 @@ function renderApprovalGates() {
   `;
   }).join("");
   box.querySelectorAll("[data-approval-gate]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const gate = button.dataset.approvalGate;
       const approved = !button.classList.contains("approved");
-      const ok = window.confirm(`${approved ? "通过" : "撤回"}${approvalGateLabel(gate)}？`);
+      const ok = await confirmDialog(`${approved ? "通过" : "撤回"}${approvalGateLabel(gate)}？`);
       if (!ok) return;
       setApproval(gate, approved);
     });
@@ -1636,12 +1663,12 @@ async function reviewCenterOutputBatch(item, action) {
   if (!outputIds.length) return;
   let comment = "审核中心批量通过";
   if (action === "needs_work") {
-    comment = window.prompt("请填写本页需要修改的具体问题，后续重生成会保留此审核反馈：", "") || "";
+    comment = await promptDialog("请填写本页需要修改的具体问题，后续重生成会保留此审核反馈：", "") || "";
     if (!comment.trim()) {
       window.alert("批量待改必须填写具体问题。");
       return;
     }
-  } else if (!window.confirm(`确认通过本页 ${outputIds.length} 个生成结果？`)) {
+  } else if (!await confirmDialog(`确认通过本页 ${outputIds.length} 个生成结果？`)) {
     return;
   }
   setButtons(true);
@@ -1726,141 +1753,22 @@ function renderReviewReasonStats(stats = {}) {
 function renderReviewCenter() {
   const data = state.reviewCenter || {};
   const items = data.items || [];
-  const summary = data.summary || {};
   const timeline = data.timeline || [];
-  const reviewStats = data.review_stats || {};
-  const badge = $("reviewCenterBadge");
-  if (badge) {
-    badge.textContent = items.length ? `${items.length} 项` : "已清空";
-    badge.className = `mini-badge ${items.length ? "agent-state-review" : "agent-state-complete"}`;
+  const visibleItems = items.filter((item) => state.reviewCenterFilter === "all" || item.kind === state.reviewCenterFilter);
+  if (!visibleItems.some((item) => String(item.id) === String(state.selectedReviewItemId))) {
+    state.selectedReviewItemId = String(visibleItems[0]?.id || "");
   }
-  const scope = $("reviewScopeMetric");
-  if (scope) scope.textContent = data.project?.title ? `${data.project.title} · 审核中心` : "审核中心";
-  const summaryBox = $("reviewCenterSummary");
-  if (summaryBox) {
-    summaryBox.innerHTML = `
-      <article><span>生成结果</span><strong>${Number(summary.outputs || 0)}</strong><small>页面 / 分镜待审核</small></article>
-      <article><span>章节拆解</span><strong>${Number(summary.breakdowns || 0)}</strong><small>拆解草稿待确认</small></article>
-      <article><span>小说设定</span><strong>${Number(summary.settings || 0)}</strong><small>角色、场景、规则</small></article>
-      <article><span>视觉素材</span><strong>${Number(summary.assets || 0)}</strong><small>作品级参考资产</small></article>
-      <article><span>任务诊断</span><strong>${Number(summary.jobs || 0)}</strong><small>失败 / 等待任务</small></article>
-    `;
+  if (!timeline.some((item) => String(item.id) === String(state.selectedReviewTimelineId))) {
+    state.selectedReviewTimelineId = String(timeline[0]?.id || "");
   }
-  const timelineBadge = $("reviewTimelineBadge");
-  const visibleTimeline = timeline;
-  if (timelineBadge) timelineBadge.textContent = visibleTimeline.length ? `${visibleTimeline.length} 条` : "暂无";
-  renderReviewReasonStats(reviewStats);
-  renderReviewObjectGroups(visibleTimeline);
-  const timelineList = $("reviewTimelineList");
-  if (timelineList) {
-    if (!visibleTimeline.length) {
-      timelineList.innerHTML = `<div class="empty">当前筛选下没有审核记录。</div>`;
-    } else {
-      const selectedExists = visibleTimeline.some((item) => String(item.id) === String(state.selectedReviewTimelineId));
-      if (!selectedExists) state.selectedReviewTimelineId = String(visibleTimeline[0]?.id || "");
-      timelineList.innerHTML = visibleTimeline.slice(0, 12).map((item) => {
-        const changes = item.change_summary || [];
-        const selectedClass = String(item.id) === String(state.selectedReviewTimelineId) ? " active" : "";
-        return `
-          <button class="review-timeline-item${selectedClass}" type="button" data-review-timeline-id="${escapeHtml(item.id)}">
-            <header>
-              <span>${escapeHtml(item.target_type_label || "审核记录")}</span>
-              <b>${escapeHtml(item.action_label || "审核")}</b>
-            </header>
-            <strong>${escapeHtml(displayUiText(item.target_label || item.target_type_label || "审核记录"))}</strong>
-            <small>${escapeHtml(item.comment || "无备注")} · ${escapeHtml(compactTime(item.created_at))}</small>
-            ${changes.length ? `<ul class="review-change-list">${changes.map((change) => `<li>${escapeHtml(displayUiText(change))}</li>`).join("")}</ul>` : ""}
-          </button>
-        `;
-      }).join("");
-      timelineList.querySelectorAll("[data-review-timeline-id]").forEach((button) => {
-        button.addEventListener("click", () => {
-          state.selectedReviewTimelineId = button.dataset.reviewTimelineId || "";
-          renderReviewCenter();
-        });
-      });
-    }
-  }
-  const detailBox = $("reviewTimelineDetail");
-  if (detailBox) {
-    const selected = visibleTimeline.find((item) => String(item.id) === String(state.selectedReviewTimelineId)) || visibleTimeline[0];
-    if (!selected) {
-      detailBox.innerHTML = `<div class="empty">选择一条审核记录查看详情。</div>`;
-    } else {
-      const changes = selected.change_summary || [];
-      const details = selected.change_details || [];
-      const canOpenTarget = selected.target && selected.target.module;
-      detailBox.innerHTML = `
-        <div class="review-detail-title">
-          <span>${escapeHtml(selected.target_type_label || "审核记录")}</span>
-          <strong>${escapeHtml(selected.action_label || "审核")}</strong>
-        </div>
-        <dl class="review-detail-grid">
-          <div><dt>对象</dt><dd>${escapeHtml(displayUiText(selected.target_label || selected.target_type_label || "审核记录"))}</dd></div>
-          <div><dt>时间</dt><dd>${escapeHtml(compactTime(selected.created_at))}</dd></div>
-          <div><dt>备注</dt><dd>${escapeHtml(selected.comment || "无备注")}</dd></div>
-          <div><dt>记录</dt><dd>#${escapeHtml(selected.id || "-")}</dd></div>
-        </dl>
-        <div class="review-detail-changes">
-          <span>变更摘要</span>
-          ${changes.length ? `<ul>${changes.map((change) => `<li>${escapeHtml(displayUiText(change))}</li>`).join("")}</ul>` : `<small>暂无结构化变更。</small>`}
-        </div>
-        <div class="review-diff-table">
-          <span>修改前后</span>
-          ${details.length ? `
-            <div class="review-diff-head"><b>字段</b><b>修改前</b><b>修改后</b></div>
-            ${details.map((item) => `
-              <div class="review-diff-row">
-                <b>${escapeHtml(item.label || item.field || "字段")}</b>
-                <small>${escapeHtml(displayUiText(item.before || "空"))}</small>
-                <small>${escapeHtml(displayUiText(item.after || "空"))}</small>
-              </div>
-            `).join("")}
-          ` : `<small>暂无可展示的字段级对比。</small>`}
-        </div>
-        <button class="review-detail-jump" type="button" data-review-detail-jump ${canOpenTarget ? "" : "disabled"} title="${canOpenTarget ? "在现有工作区定位该对象" : "该记录暂无可定位对象"}">
-          <span aria-hidden="true">⌖</span><strong>${canOpenTarget ? "定位对象" : "暂无定位"}</strong>
-        </button>
-      `;
-      const jumpButton = detailBox.querySelector("[data-review-detail-jump]");
-      if (jumpButton && canOpenTarget) {
-        jumpButton.addEventListener("click", async () => {
-          await openReviewTarget(selected.target || {});
-        });
-      }
-    }
-  }
-  const list = $("reviewCenterList");
-  if (!list) return;
-  const filter = state.reviewCenterFilter || "all";
-  const visible = items.filter((item) => filter === "all" || item.kind === filter);
-  if (!visible.length) {
-    list.innerHTML = `<div class="empty">当前筛选下没有待处理审核项。</div>`;
-    renderReviewObjectDetail(null, visibleTimeline);
-    return;
-  }
-  if (!visible.some((item) => String(item.id) === String(state.selectedReviewItemId))) {
-    state.selectedReviewItemId = String(visible[0]?.id || "");
-  }
-  const selectedReviewItem = visible.find((item) => String(item.id) === String(state.selectedReviewItemId)) || visible[0];
-  renderReviewObjectDetail(selectedReviewItem, visibleTimeline);
-  list.innerHTML = visible.map((item, index) => `
-    <button class="review-center-row review-kind-${escapeHtml(item.kind || "info")} ${String(item.id) === String(state.selectedReviewItemId) ? "active" : ""}" type="button" data-review-index="${index}">
-      <span>${escapeHtml(item.kind_label || item.kind || "审核")}</span>
-      <strong>${escapeHtml(displayUiText(item.title || ""))}</strong>
-      <small>${escapeHtml(displayUiText(item.detail || ""))}</small>
-      <footer>
-        <b>${escapeHtml(item.status_label || item.status || "-")}</b>
-        <em>${escapeHtml(item.action_label || "处理")}</em>
-      </footer>
-    </button>
-  `).join("");
-  list.querySelectorAll("[data-review-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const item = visible[Number(button.dataset.reviewIndex)];
-      state.selectedReviewItemId = String(item?.id || "");
-      renderReviewCenter();
-    });
+  window.comicReviewCenter?.update({
+    reviewCenter: data,
+    queueFilter: state.reviewCenterFilter,
+    timelineFilter: state.reviewTimelineFilter,
+    timelineRange: state.reviewTimelineRange,
+    timelineLimit: Number(state.reviewTimelineLimit || 40),
+    selectedQueueItemId: state.selectedReviewItemId,
+    selectedTimelineItemId: state.selectedReviewTimelineId,
   });
 }
 
@@ -2044,7 +1952,7 @@ async function saveProjectSettings(slug) {
 async function exportProjectBackup(slug) {
   if (!slug) return;
   const includeMedia = Boolean(document.querySelector(`[data-backup-media="${CSS.escape(slug)}"]`)?.checked);
-  if (includeMedia && !window.confirm("包含素材与漫画图片会显著增大备份文件，确认继续导出？")) return;
+  if (includeMedia && !await confirmDialog("包含素材与漫画图片会显著增大备份文件，确认继续导出？")) return;
   setButtons(true);
   try {
     const result = await api(`/api/projects/${encodeURIComponent(slug)}/backup`, {
@@ -2098,7 +2006,7 @@ async function importProjectBackup(file) {
 async function archiveProject(slug, archived) {
   if (!slug) return;
   const verb = archived ? "归档" : "恢复";
-  if (archived && !window.confirm(`确认${verb}这个小说项目？归档不会删除小说、数据库记录或输出文件。`)) return;
+  if (archived && !await confirmDialog(`确认${verb}这个小说项目？归档不会删除小说、数据库记录或输出文件。`)) return;
   setButtons(true);
   try {
     await api(`/api/projects/${encodeURIComponent(slug)}/archive`, {
@@ -2180,7 +2088,7 @@ async function processNovel() {
     window.alert("项目标识已存在。请先预览章节，并选择可用的更新策略。");
     return;
   }
-  const ok = window.confirm(`开始处理小说？当前策略：${strategyLabels[strategy] || strategy}。任务会写入 PostgreSQL，并更新该作品的章节索引。`);
+  const ok = await confirmDialog(`开始处理小说？当前策略：${strategyLabels[strategy] || strategy}。任务会写入 PostgreSQL，并更新该作品的章节索引。`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -2524,7 +2432,7 @@ async function setApproval(gate, approved) {
 async function runAgentPrimary() {
   const rec = state.agent?.recommendation || {};
   if (rec.gate === "next_episode" && rec.next_episode) {
-    const ok = window.confirm(`确认进入第 ${Number(rec.next_episode)} 章？`);
+    const ok = await confirmDialog(`确认进入第 ${Number(rec.next_episode)} 章？`);
     if (!ok) return;
     await setApproval("next_episode", true);
     await loadEpisode(rec.next_episode);
@@ -2532,13 +2440,13 @@ async function runAgentPrimary() {
     return;
   }
   if (rec.requires_approval && rec.gate) {
-    const ok = window.confirm(`通过${approvalGateLabel(rec.gate)}？`);
+    const ok = await confirmDialog(`通过${approvalGateLabel(rec.gate)}？`);
     if (!ok) return;
     await setApproval(rec.gate, true);
     return;
   }
   if (rec.stage) {
-    const ok = window.confirm(`执行 ${rec.action_label || rec.stage}？任务会进入后台日志，当前章节为第 ${state.selectedEpisode} 章。`);
+    const ok = await confirmDialog(`执行 ${rec.action_label || rec.stage}？任务会进入后台日志，当前章节为第 ${state.selectedEpisode} 章。`);
     if (!ok) return;
     await runStage(rec.stage);
     await Promise.all([loadJobs(), loadAgent()]);
@@ -2828,7 +2736,7 @@ async function reviewBreakdown(action) {
     return;
   }
   const label = action === "approve" ? "通过当前章节拆解？" : "标记当前章节拆解待改？";
-  if (!window.confirm(label)) return;
+  if (!await confirmDialog(label)) return;
   setButtons(true);
   try {
     await api(`/api/breakdowns/${id}/review`, {
@@ -3072,6 +2980,24 @@ function renderSourceView() {
   `;
   box.append(header);
 
+  if (!pages.length && source.text) {
+    const node = document.createElement("article");
+    node.className = "source-page-card";
+    node.innerHTML = `
+      <header>
+        <span>章节全文</span>
+        <strong>${escapeHtml(source.chapter_title || state.detail?.episode_title || "当前章节")}</strong>
+        <small>${escapeHtml(lineRange)}</small>
+      </header>
+    `;
+    const fullText = document.createElement("pre");
+    fullText.className = "source-text";
+    fullText.textContent = source.text;
+    node.append(fullText);
+    box.append(node);
+    return;
+  }
+
   for (const page of pages) {
     const node = document.createElement("article");
     node.className = "source-page-card";
@@ -3236,7 +3162,7 @@ async function generateSelectedAssets() {
     window.alert("单次最多选择 20 个素材，请分批生成。");
     return;
   }
-  const ok = window.confirm(`批量生成 ${assetIds.length} 个素材？预计调用图片模型 ${assetIds.length} 次，实际费用按供应商计费。任务会串行执行，可在任务中心查看进度和重试失败项。`);
+  const ok = await confirmDialog(`批量生成 ${assetIds.length} 个素材？预计调用图片模型 ${assetIds.length} 次，实际费用按供应商计费。任务会串行执行，可在任务中心查看进度和重试失败项。`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -3268,7 +3194,7 @@ async function syncAssetsToDatabase() {
     window.alert("当前没有可同步的素材。请先在小说设定库审核或锁定关键设定。");
     return;
   }
-  const ok = window.confirm(`将当前扫描到的 ${total} 个作品级素材，以及 ${approvedSettings} 个已审核全局设定同步到素材库？已有素材会更新使用关系，不会覆盖已通过或已锁定的审核状态。`);
+  const ok = await confirmDialog(`将当前扫描到的 ${total} 个作品级素材，以及 ${approvedSettings} 个已审核全局设定同步到素材库？已有素材会更新使用关系，不会覆盖已通过或已锁定的审核状态。`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -3317,7 +3243,7 @@ async function reviewOutput(outputId, action) {
     needs_work: "标记待改",
     pending: "退回待审",
   };
-  const comment = window.prompt(`${labels[action] || "更新审核状态"}：可填写审核备注`, "");
+  const comment = await promptDialog(`${labels[action] || "更新审核状态"}：可填写审核备注`, "");
   if (comment === null) return;
   const qualityChecks = readQualityChecks(outputId);
   setButtons(true);
@@ -3356,7 +3282,7 @@ async function reviewVisibleOutputs(action) {
   };
   const targetLabel = state.mediaFilter === "pages" ? "页面" : (state.mediaFilter === "panels" ? "分镜" : "生成结果");
   const scopeLabel = focusPageId ? `${pageDisplayName(focusPageId)}当前聚焦的` : "当前筛选中的";
-  const ok = window.confirm(`${labels[action] || "批量审核"}${scopeLabel} ${outputIds.length} 个${targetLabel}？`);
+  const ok = await confirmDialog(`${labels[action] || "批量审核"}${scopeLabel} ${outputIds.length} 个${targetLabel}？`);
   if (!ok) return;
   const qualityChecks = defaultQualityChecksForAction(action);
   setButtons(true);
@@ -4604,42 +4530,18 @@ function taskStatusGroup(status) {
 }
 
 function renderTaskCenter() {
-  const badge = $("taskCenterBadge");
-  const summary = $("taskCenterSummary");
-  const list = $("taskCenterJobs");
-  const detail = $("taskDetail");
-  if (!badge || !summary || !list) return;
-  const counts = state.jobs.reduce((acc, job) => {
-    const group = taskStatusGroup(job.status);
-    acc.total += 1;
-    acc[group] = (acc[group] || 0) + 1;
-    if (job.diagnostics?.issues?.length || Number(job.diagnostics?.waiting_for_panels || 0)) acc.diagnostics += 1;
-    return acc;
-  }, { total: 0, running: 0, waiting: 0, failed: 0, passed: 0, other: 0, diagnostics: 0 });
-  badge.textContent = counts.total ? `${counts.total} 条` : "暂无";
-  const cards = [
-    ["全部", counts.total, "最近任务记录"],
-    ["运行中", counts.running, "正在执行或排队"],
-    ["等待", counts.waiting, "需要继续处理"],
-    ["失败", counts.failed, "需要诊断或重试"],
-    ["已完成", counts.passed, "最近完成任务"],
-    ["诊断", counts.diagnostics, "含结构化诊断"],
-  ];
-  summary.innerHTML = cards.map(([label, value, detail]) => `
-    <article class="task-summary-card">
-      <span>${escapeHtml(label)}</span>
-      <strong>${Number(value || 0)}</strong>
-      <small>${escapeHtml(detail)}</small>
-    </article>
-  `).join("");
-  const filter = state.taskCenterFilter || "all";
-  const visible = state.jobs.filter((job) => filter === "all" || taskStatusGroup(job.status) === filter);
-  if (!visible.some((job) => String(job.id || "") === String(state.selectedTaskJobId || ""))) {
-    state.selectedTaskJobId = visible[0]?.id || "";
+  const activeFilter = state.taskCenterFilter || "all";
+  const visibleJobs = state.jobs.filter((job) => activeFilter === "all" || taskStatusGroup(job.status) === activeFilter);
+  if (!visibleJobs.some((job) => String(job.id || "") === String(state.selectedTaskJobId || ""))) {
+    state.selectedTaskJobId = visibleJobs[0]?.id || "";
     state.taskFilePreview = null;
   }
-  renderJobList(list, visible);
-  if (detail) renderTaskDetail(selectedTaskJob(visible));
+  window.comicTaskCenter?.update({
+    jobs: state.jobs,
+    filter: activeFilter,
+    selectedJobId: String(state.selectedTaskJobId || ""),
+    taskFilePreview: state.taskFilePreview,
+  });
 }
 
 function selectedTaskJob(jobs = state.jobs) {
@@ -4899,18 +4801,33 @@ function taskFilePreviewHtml(data, path, error = "") {
 
 async function previewTaskFile(path) {
   if (!path) return;
-  const preview = $("taskFilePreview");
-  if (!preview) return;
-  preview.hidden = false;
-  preview.innerHTML = `<p>读取中...</p>`;
+  state.taskFilePreview = {
+    jobId: state.selectedTaskJobId || "",
+    path,
+    data: null,
+    error: "",
+    loading: true,
+  };
+  renderTaskCenter();
   try {
     const data = await loadTaskFilePreview(path);
     state.taskFilePreview = { jobId: state.selectedTaskJobId || "", path, data, error: "" };
-    preview.innerHTML = taskFilePreviewHtml(data, path);
   } catch (error) {
     const message = error.message || "文件预览失败";
     state.taskFilePreview = { jobId: state.selectedTaskJobId || "", path, data: null, error: message };
-    preview.innerHTML = taskFilePreviewHtml(null, path, message);
+  }
+  renderTaskCenter();
+}
+
+async function runTaskFileAction({ path, mode = "select" } = {}) {
+  if (!path) return;
+  try {
+    await api("/api/file-action", {
+      method: "POST",
+      body: JSON.stringify({ path, mode }),
+    });
+  } catch (error) {
+    window.alert(error.message || "打开文件失败");
   }
 }
 
@@ -5038,7 +4955,7 @@ async function runCloseReading() {
   const stats = closeReadingStats(state.detail?.pages || []);
   const batchSize = Math.max(1, getInt("maxPages", 2));
   const willUpdate = Math.min(stats.safe, batchSize);
-  const ok = window.confirm(`细读拆解本次会更新 ${willUpdate}/${stats.safe} 个待细读页面，并保护 ${stats.protected} 个已有输出页面。完成后需要重新审核拆解；如仍有剩余页面，可继续点击下一轮。继续吗？`);
+  const ok = await confirmDialog(`细读拆解本次会更新 ${willUpdate}/${stats.safe} 个待细读页面，并保护 ${stats.protected} 个已有输出页面。完成后需要重新审核拆解；如仍有剩余页面，可继续点击下一轮。继续吗？`);
   if (!ok) return;
   await runStage("close_reading");
 }
@@ -5057,7 +4974,7 @@ async function regeneratePanel(pageId, panelId) {
   const missing = panel && !panel.exists;
   const action = missing ? "补生成" : "重新生成";
   const detail = missing ? "当前分镜没有真实输出，完成后会自动尝试重新组装页面。" : "旧图会先备份，完成后自动尝试重新组装页面。";
-  const ok = window.confirm(`${action}${fullPanelDisplayName(panelId, pageId)}？${detail}`);
+  const ok = await confirmDialog(`${action}${fullPanelDisplayName(panelId, pageId)}？${detail}`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -5087,7 +5004,7 @@ async function regeneratePage(pageId) {
   }
   const panels = (state.detail?.media?.panels || []).filter((item) => item.page_id === pageId);
   const missing = panels.filter((item) => !item.exists);
-  const ok = window.confirm(`补齐${pageDisplayName(pageId)}？将依次生成 ${missing.length} 个缺失分镜，完成后自动合成页面并同步入库。`);
+  const ok = await confirmDialog(`补齐${pageDisplayName(pageId)}？将依次生成 ${missing.length} 个缺失分镜，完成后自动合成页面并同步入库。`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -5106,7 +5023,7 @@ async function regeneratePage(pageId) {
 }
 
 async function retryGenerate(episodeNumber) {
-  const ok = window.confirm(`继续尝试第 ${episodeNumber} 章缺失分镜生成？`);
+  const ok = await confirmDialog(`继续尝试第 ${episodeNumber} 章缺失分镜生成？`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -5134,7 +5051,7 @@ async function retryGenerate(episodeNumber) {
 
 async function cancelJob(jobId) {
   if (!jobId) return;
-  const ok = window.confirm("确认取消当前正在运行的任务？已完成的输出不会自动删除。");
+  const ok = await confirmDialog("确认取消当前正在运行的任务？已完成的输出不会自动删除。");
   if (!ok) return;
   try {
     await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: JSON.stringify({}) });
@@ -5147,7 +5064,7 @@ async function cancelJob(jobId) {
 
 async function retryJob(jobId) {
   if (!jobId) return;
-  const ok = window.confirm("使用原任务参数重新启动？新任务会单独记录，原任务历史不会被覆盖。");
+  const ok = await confirmDialog("使用原任务参数重新启动？新任务会单独记录，原任务历史不会被覆盖。");
   if (!ok) return;
   try {
     const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST", body: JSON.stringify({}) });
@@ -5160,7 +5077,7 @@ async function retryJob(jobId) {
 }
 
 async function regenerateAsset(asset) {
-  const ok = window.confirm(`重新生成素材 ${asset.alias}？旧素材会先备份，新图会输出到同一资产路径。`);
+  const ok = await confirmDialog(`重新生成素材 ${asset.alias}？旧素材会先备份，新图会输出到同一资产路径。`);
   if (!ok) return;
   setButtons(true);
   try {
@@ -5195,6 +5112,37 @@ function syncModuleNavigation() {
   });
 }
 
+function syncWorkflowChapterContext() {
+  const chapterContext = $("railChapterContext");
+  const workflowSidebar = $("workflowChapterSidebar");
+  if (!chapterContext || !workflowSidebar) return;
+  if (workflowSidebar.parentElement !== chapterContext) chapterContext.appendChild(workflowSidebar);
+  chapterContext.hidden = state.activeModule !== "workflow";
+}
+
+function openContextDrawer(title = "属性与流程") {
+  const drawer = $("contextDrawer");
+  const workbench = document.querySelector(".workbench");
+  if (!drawer || !workbench) return;
+  $("contextDrawerTitle").textContent = title;
+  drawer.hidden = false;
+  drawer.setAttribute("aria-hidden", "false");
+  drawer.classList.add("assistant-expanded");
+  workbench.classList.add("context-drawer-open");
+  $("agentFocusButton")?.setAttribute("aria-expanded", "true");
+}
+
+function closeContextDrawer() {
+  const drawer = $("contextDrawer");
+  const workbench = document.querySelector(".workbench");
+  if (!drawer || !workbench) return;
+  drawer.hidden = true;
+  drawer.setAttribute("aria-hidden", "true");
+  drawer.classList.remove("assistant-expanded");
+  workbench.classList.remove("context-drawer-open");
+  $("agentFocusButton")?.setAttribute("aria-expanded", "false");
+}
+
 function currentWorkspaceSearch() {
   return {
     workflow: "episodeSearch",
@@ -5213,7 +5161,9 @@ function updateGlobalSearch() {
 }
 
 async function switchModule(module, workspaceTab = "") {
+  closeContextDrawer();
   state.activeModule = module;
+  syncWorkflowChapterContext();
   document.querySelectorAll("[data-module-view]").forEach((view) => {
     view.classList.toggle("active", view.dataset.moduleView === module);
   });
@@ -5255,327 +5205,26 @@ async function switchModule(module, workspaceTab = "") {
   updateGlobalSearch();
 }
 
-function settingsSourceRows() {
-  const configPath = state.config?.config_path || "config/.env";
-  const textPath = state.config?.text_env_path || "config/text.env";
-  const imagePath = state.config?.image_env_path || "config/image.env";
-  const database = state.config?.database || state.health?.database || {};
-  const activeProject = state.projects?.find?.((item) => item.slug === state.activeProject) || {};
-  const localImageBackend = currentImageBackend() === "comfyui";
-  return [
-    {
-      title: "控制台运行配置",
-      path: configPath,
-      detail: "图片后端类型、ComfyUI 可选参数、小说路径、数据库地址、默认页数和当前小说项目。",
-      state: state.config ? "已读取" : "未读取",
-      ok: Boolean(state.config),
-    },
-    {
-      title: "小说处理密钥",
-      path: textPath,
-      detail: "小说处理 API Key 和文本模型接口地址。用于导入增强、细读拆解和设定扫描。",
-      state: state.config?.text?.OPENAI_API_KEY_CONFIGURED ? "已配置" : "未配置",
-      ok: Boolean(state.config?.text?.OPENAI_API_KEY_CONFIGURED),
-    },
-    {
-      title: "图片生成密钥",
-      path: imagePath,
-      detail: "图片生成 API Key 和图片模型接口地址。直连 API 与 ComfyUI 云端图片节点使用。",
-      state: state.config?.image?.OPENAI_API_KEY_CONFIGURED ? "已配置" : (localImageBackend ? "本地可选" : "未配置"),
-      ok: Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || localImageBackend),
-    },
-    {
-      title: "PostgreSQL 数据",
-      path: $("databaseUrl")?.value || state.config?.config?.COMIC_PIPELINE_DATABASE_URL || "-",
-      detail: "作品、章节、拆解、设定、素材、生成结果、审核记录、任务状态。",
-      state: database.schema_ready ? "已连接" : "未连接",
-      ok: Boolean(database.schema_ready),
-    },
-    {
-      title: "当前小说项目",
-      path: activeProject.title || state.activeProject || "-",
-      detail: "小说内容、章节工作台、设定库、素材库和审核任务均按小说项目隔离。",
-      state: state.activeProject ? "已选择" : "未选择",
-      ok: Boolean(state.activeProject),
-    },
-  ];
-}
-
-function renderSettingsSources() {
-  const box = $("settingsSourceList");
-  if (!box) return;
-  box.innerHTML = settingsSourceRows().map((item, index) => `
-    <article class="settings-source-item">
-      <span class="settings-source-index">${String(index + 1).padStart(2, "0")}</span>
-      <div>
-        <header>
-          <strong>${escapeHtml(item.title)}</strong>
-          <em class="${item.ok ? "ok" : "bad"}">${escapeHtml(item.state)}</em>
-        </header>
-        <p>${escapeHtml(item.detail)}</p>
-        <code>${escapeHtml(item.path)}</code>
-      </div>
-    </article>
-  `).join("");
-}
-
-function settingsCheckAction(name) {
-  return {
-    postgres: "检查 PostgreSQL 服务、账号密码和端口。",
-    image_backend: currentImageBackend() === "comfyui"
-      ? "确认 ComfyUI 已启动，或使用“启动 ComfyUI”。"
-      : "配置图片 API Key 后测试图片生成模型。",
-    text_api_key: "在小说处理配置中填写有效 API Key 后保存。",
-    image_api_key: "在图片生成配置中填写有效 API Key 后保存。",
-    output_root: "确认输出目录存在，并且当前用户有写入权限。",
-    novel_model: "在小说处理模型中填写可用模型名称。",
-    image_model: "在图片生成模型中填写可用模型名称。",
-    pipeline_example: "同步 config/.env.example，让示例配置包含全部 UI 设置项且没有过期项。",
-    text_example: "同步 config/text.env.example，让示例配置包含 OPENAI_API_KEY 和 OPENAI_BASE_URL。",
-    image_example: "同步 config/image.env.example，让示例配置包含 OPENAI_API_KEY 和 OPENAI_BASE_URL。",
-  }[name] || "检查对应配置项后重新测试。";
-}
-
-function renderSettingsHealth() {
-  const badge = $("settingsHealthBadge");
-  const box = $("settingsHealthList");
-  if (!box) return;
-  const data = state.settingsHealth;
-  if (!data) {
-    if (badge) {
-      badge.textContent = "未测试";
-      badge.className = "mini-badge";
-    }
-    box.innerHTML = `<div class="settings-empty">点击“连接测试”检查 PostgreSQL、当前图片后端、API Key、输出目录、模型配置和示例配置一致性。</div>`;
-    return;
-  }
-  const checks = Array.isArray(data.checks) ? data.checks : [];
-  const passed = checks.filter((item) => item.ok).length;
-  if (badge) {
-    badge.textContent = data.ok ? "全部通过" : `${passed}/${checks.length} 通过`;
-    badge.className = `mini-badge ${data.ok ? "agent-state-complete" : "agent-state-blocked"}`;
-  }
-  box.innerHTML = checks.map((item) => `
-    <article class="settings-health-item ${item.ok ? "ok" : "bad"}">
-      <span class="status-dot"></span>
-      <div>
-        <header>
-          <strong>${escapeHtml(item.label || item.name || "检查项")}</strong>
-          <em>${item.ok ? "通过" : "需处理"}</em>
-        </header>
-        <p>${escapeHtml(item.message || "-")}</p>
-        ${item.source ? `<small>来源：${escapeHtml(sourceLabel(item.source))}</small>` : ""}
-        ${item.ok ? "" : `<small>${escapeHtml(settingsCheckAction(item.name))}</small>`}
-      </div>
-    </article>
-  `).join("") || `<div class="settings-empty">没有返回检查项。</div>`;
-}
-
 function updateSettingsBadges() {
-  renderSettingsSources();
-  renderSettingsHealth();
-  renderEffectiveProjectConfig();
-  const backendBadge = $("settingsBackendBadge");
-  if (backendBadge) {
-    const backend = currentImageBackend();
-    const pendingSave = imageBackendSelectionChanged();
-    const ready = !pendingSave && imageBackendReady();
-    backendBadge.textContent = pendingSave
-      ? "保存后检查"
-      : ready
-        ? (backend === "comfyui" ? "ComfyUI 可用" : "直连 API 可用")
-        : (backend === "comfyui" ? "ComfyUI 未就绪" : "直连 API 未就绪");
-    backendBadge.className = `mini-badge ${pendingSave ? "agent-state-review" : ready ? "agent-state-complete" : "agent-state-blocked"}`;
-  }
-  const textKeyBadge = $("settingsTextKeyBadge");
-  if (textKeyBadge) {
-    const configured = Boolean(state.config?.text?.OPENAI_API_KEY_CONFIGURED || state.health?.text_api_key_configured);
-    textKeyBadge.textContent = configured ? "已配置" : "未配置";
-    textKeyBadge.className = `mini-badge ${configured ? "agent-state-complete" : "agent-state-blocked"}`;
-  }
-  const imageKeyBadge = $("settingsImageKeyBadge");
-  if (imageKeyBadge) {
-    const configured = Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
-    const optional = currentImageBackend() === "comfyui";
-    imageKeyBadge.textContent = configured ? "已配置" : (optional ? "本地可选" : "未配置");
-    imageKeyBadge.className = `mini-badge ${configured || optional ? "agent-state-complete" : "agent-state-blocked"}`;
-  }
-  const dbBadge = $("settingsDatabaseBadge");
-  if (dbBadge) {
-    const ready = Boolean(state.config?.database?.schema_ready || state.health?.database?.schema_ready);
-    dbBadge.textContent = ready ? "已连接" : "未连接";
-    dbBadge.className = `mini-badge ${ready ? "agent-state-complete" : "agent-state-blocked"}`;
-  }
-  const dbDetail = $("databaseDetail");
-  if (dbDetail) {
-    const database = state.config?.database || state.health?.database || {};
-    dbDetail.textContent = database.schema_ready
-      ? "PostgreSQL 已连接，作品、章节、审核状态和任务索引会写入数据库。"
-      : (database.error || "PostgreSQL 未就绪。");
-  }
-  const textApiKeyDetail = $("textApiKeyDetail");
-  if (textApiKeyDetail) {
-    const configured = Boolean(state.config?.text?.OPENAI_API_KEY_CONFIGURED || state.health?.text_api_key_configured);
-    textApiKeyDetail.textContent = configured
-      ? "小说处理密钥已配置。留空保存不会覆盖现有密钥。"
-      : "小说处理密钥未配置。填写后保存到 text.env，页面不会回显明文。";
-  }
-  const imageApiKeyDetail = $("imageApiKeyDetail");
-  if (imageApiKeyDetail) {
-    const configured = Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
-    imageApiKeyDetail.textContent = configured
-      ? "图片生成密钥已配置。留空保存不会覆盖现有密钥。"
-      : currentImageBackend() === "comfyui"
-        ? "本地模型工作流无需图片 API Key；仅在工作流使用云端图片节点时配置。"
-      : "图片生成密钥未配置。填写后保存到 image.env，页面不会回显明文。";
-  }
-  updateImageBackendControls();
-  renderGenerationBackendDiagnostics();
+  renderSettingsView();
 }
 
 function currentImageBackend() {
-  return $("imageBackend")?.value
-    || state.settingsSummary?.image_backend
-    || state.health?.image_backend
-    || state.config?.config?.COMIC_PIPELINE_IMAGE_BACKEND
-    || "direct_api";
-}
-
-function savedImageBackend() {
   return state.settingsSummary?.image_backend
     || state.health?.image_backend
     || state.config?.config?.COMIC_PIPELINE_IMAGE_BACKEND
     || "direct_api";
 }
 
-function imageBackendSelectionChanged() {
-  const control = $("imageBackend");
-  return Boolean(control?.value && control.value !== savedImageBackend());
-}
-
 function imageBackendReady() {
-  if (imageBackendSelectionChanged()) return false;
   if (typeof state.health?.generation_ready === "boolean") return state.health.generation_ready;
   return currentImageBackend() === "comfyui"
     ? Boolean(state.health?.checks?.root?.ok)
     : Boolean(state.config?.image?.OPENAI_API_KEY_CONFIGURED || state.health?.image_api_key_configured);
 }
 
-function updateImageBackendControls() {
-  const isComfy = currentImageBackend() === "comfyui";
-  const pendingSave = imageBackendSelectionChanged();
-  const fields = $("comfySettingsFields");
-  const startButton = $("startBackendButton");
-  const checkButton = $("checkBackendButton");
-  const testImageButton = $("testImageModelButton");
-  const note = $("backendModeNote");
-  if (fields) fields.disabled = !isComfy;
-  if (startButton) {
-    startButton.textContent = isComfy ? "启动 ComfyUI" : "无需启动";
-    startButton.disabled = !isComfy || pendingSave;
-    startButton.title = isComfy ? "启动设置中的 ComfyUI" : "直连 API 不需要启动独立服务";
-  }
-  if (checkButton) {
-    checkButton.textContent = isComfy ? "检查 ComfyUI" : "检查直连 API";
-    checkButton.disabled = pendingSave;
-  }
-  if (testImageButton) {
-    testImageButton.textContent = isComfy ? "检查本地模型环境" : "测试图片生成模型";
-    testImageButton.disabled = pendingSave;
-  }
-  if (note) {
-    note.textContent = isComfy
-      ? "使用本地模型、LoRA、ControlNet 或可视化工作流时选择此模式。"
-      : "默认直连图片 API，不访问 8188，也无需启动独立生成服务。";
-  }
-}
-
 function sourceLabel(value) {
   return value === "project" ? "当前小说项目" : "全局设置";
-}
-
-function renderEffectiveProjectConfig() {
-  const box = $("effectiveProjectConfig");
-  if (!box) return;
-  const summary = state.settingsSummary || {};
-  const models = summary.models || {};
-  const paths = summary.paths || {};
-  const project = summary.project || {};
-  const modelSources = models.sources || {};
-  const pathSources = paths.sources || {};
-  const rows = [
-    ["图片生成后端", summary.image_backend === "comfyui" ? "ComfyUI（本地模型）" : "直连图片 API", "全局配置"],
-    ["小说处理模型", models.novel_model || "-", sourceLabel(modelSources.novel_model)],
-    ["图片生成模型", models.image_model || "-", sourceLabel(modelSources.image_model)],
-    ["输出目录", paths.output_root || "-", sourceLabel(pathSources.output_root)],
-  ];
-  box.innerHTML = `
-    <div class="effective-config-head">
-      <strong>当前生效配置</strong>
-      <span>${escapeHtml(project.title || project.slug || "当前小说")}</span>
-    </div>
-    ${rows.map(([label, value, source]) => `
-      <div class="effective-config-row">
-        <span>${escapeHtml(label)}</span>
-        <code>${escapeHtml(value)}</code>
-        <em>${escapeHtml(source)}</em>
-      </div>
-    `).join("")}
-  `;
-}
-
-function renderGenerationBackendDiagnostics(data = state.generationBackend) {
-  const box = $("backendDiagnostics");
-  if (!box) return;
-  if (imageBackendSelectionChanged()) {
-    box.textContent = "后端类型已修改，请先保存设置，再检查当前图片后端。";
-    return;
-  }
-  const source = data?.diagnostics || data;
-  if (!source) {
-    if (currentImageBackend() === "direct_api") {
-      box.textContent = "直连图片 API 模式无需启动服务。点击“检查直连 API”查看接口和密钥状态。";
-      return;
-    }
-    const rootOk = Boolean(state.health?.paths?.comfy_root?.exists);
-    const rootState = rootOk ? "ComfyUI 根目录存在" : "ComfyUI 根目录未确认";
-    box.textContent = `${rootState}。点击“检查后端”获取端口、启动入口、模型目录和日志状态。`;
-    return;
-  }
-  if (source.image_backend === "direct_api") {
-    const provider = source.provider || {};
-    box.innerHTML = `
-      <dl>
-        <div><dt>状态</dt><dd>${source.ok ? "直连图片 API 已就绪" : "直连图片 API 未就绪"}</dd></div>
-        <div><dt>接口</dt><dd>${escapeHtml(provider.base_url || "使用默认 OpenAI 地址")}</dd></div>
-        <div><dt>密钥</dt><dd>${provider.api_key_configured ? "已配置" : "未配置"}</dd></div>
-        <div><dt>启动</dt><dd>无需独立服务，不访问 8188</dd></div>
-      </dl>
-    `;
-    return;
-  }
-  const paths = source.paths || {};
-  const logs = source.logs || {};
-  const modelCatalog = source.health?.model_catalog || {};
-  const modelIssues = [
-    ...(modelCatalog.missing_nodes || []).map((item) => `节点:${item}`),
-    ...(modelCatalog.missing_models || []).map((item) => `模型:${item}`),
-  ];
-  const stderrTail = source.ok
-    ? "后端已运行，健康检查通过。"
-    : (logs.stderr?.tail || "").trim().split(/\r?\n/).slice(-4).join(" / ");
-  const modelSummary = ["checkpoints", "loras", "vae", "clip", "controlnet"]
-    .map((key) => `${key}:${Number(paths[key]?.files || 0)}`)
-    .join(" · ");
-  box.innerHTML = `
-    <dl>
-      <div><dt>状态</dt><dd>${source.ok ? "健康检查通过" : "不可访问或检查未通过"}</dd></div>
-      <div><dt>地址</dt><dd>${escapeHtml(source.comfy_url || "-")} / 端口 ${source.port_open ? "已打开" : "未打开"}</dd></div>
-      <div><dt>入口</dt><dd>${paths.main_py?.exists ? "main.py 存在" : "main.py 缺失"} · ${paths.python?.exists ? "Python 可用" : "Python 不可用"}</dd></div>
-      <div><dt>模型</dt><dd>${escapeHtml(modelSummary)}${modelIssues.length ? ` · ${escapeHtml(modelIssues.join(" / "))}` : ""}</dd></div>
-      <div><dt>日志</dt><dd>${escapeHtml(stderrTail || "暂无错误日志")}</dd></div>
-    </dl>
-  `;
 }
 
 function switchTab(tab) {
@@ -5638,7 +5287,7 @@ function setButtons(disabled) {
   });
   if (!disabled) {
     updateStageActions();
-    updateImageBackendControls();
+    renderSettingsView();
   }
 }
 
@@ -5775,7 +5424,78 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function bindVueWorkspaceActions() {
+  window.comicReviewCenter?.setActions({
+    refresh: () => loadReviewCenter().catch((error) => window.alert(error.message || "审核中心加载失败")),
+    queueFilterChange: (value) => {
+      state.reviewCenterFilter = value;
+      renderReviewCenter();
+    },
+    timelineFilterChange: (value) => {
+      state.reviewTimelineFilter = value;
+      state.selectedReviewTimelineId = "";
+      loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
+    },
+    timelineRangeChange: (value) => {
+      state.reviewTimelineRange = value;
+      state.selectedReviewTimelineId = "";
+      loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
+    },
+    timelineLimitChange: (value) => {
+      state.reviewTimelineLimit = String(value);
+      state.selectedReviewTimelineId = "";
+      loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
+    },
+    selectQueueItem: (value) => {
+      state.selectedReviewItemId = value;
+      renderReviewCenter();
+    },
+    selectTimelineItem: (value) => {
+      state.selectedReviewTimelineId = value;
+      renderReviewCenter();
+    },
+    openTarget: (target) => openReviewTarget(target).catch((error) => window.alert(error.message || "无法定位审核对象")),
+    reviewOutputBatch: (item, action) => reviewCenterOutputBatch(item, action),
+  });
+
+  window.comicTaskCenter?.setActions({
+    filterChange: (value) => {
+      state.taskCenterFilter = value;
+      renderTaskCenter();
+    },
+    select: (value) => {
+      state.selectedTaskJobId = value;
+      state.taskFilePreview = null;
+      renderTaskCenter();
+    },
+    cancel: (value) => cancelJob(value),
+    retry: (value) => retryJob(value),
+    refresh: () => loadJobs().catch((error) => window.alert(error.message || "任务列表加载失败")),
+    previewFile: ({ jobId, path }) => {
+      state.selectedTaskJobId = jobId;
+      previewTaskFile(path);
+    },
+    downloadFile: ({ path }) => downloadTaskFile(path),
+    fileAction: (payload) => runTaskFileAction(payload),
+  });
+
+  window.comicSettings?.setActions({
+    save: (payload) => saveConfig(payload),
+    healthCheck: () => checkSettingsHealth(),
+    fetchModels: (request) => fetchModelList(request),
+    testModel: (request) => testModel(request),
+    backendCheck: () => checkGenerationBackend(),
+    backendStart: (request) => startGenerationBackend(request),
+    openDirectory: (key) => openDesktopDirectory(key),
+    checkUpdate: () => checkDesktopUpdate(),
+    installUpdate: () => installDesktopUpdate(),
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  bindVueWorkspaceActions();
+  initializeDesktopIntegration();
+  syncWorkflowChapterContext();
   $("refreshButton").addEventListener("click", loadAll);
   $("topReviewButton")?.addEventListener("click", () => switchModule("reviewCenter"));
   $("topTaskButton")?.addEventListener("click", () => switchModule("taskCenter"));
@@ -5790,31 +5510,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $("importWizardButton").addEventListener("click", () => switchModule("importNovel"));
   $("importOpenSettingsButton").addEventListener("click", () => switchModule("settings"));
   $("homeSettingsButton").addEventListener("click", () => switchModule("settings"));
-  $("reviewCenterRefreshButton").addEventListener("click", loadReviewCenter);
-  $("taskCenterRefreshButton").addEventListener("click", loadJobs);
-  $("taskCenterFilter").addEventListener("change", (event) => {
-    state.taskCenterFilter = event.target.value;
-    renderTaskCenter();
-  });
-  $("reviewCenterFilter").addEventListener("change", (event) => {
-    state.reviewCenterFilter = event.target.value;
-    renderReviewCenter();
-  });
-  $("reviewTimelineFilter").addEventListener("change", (event) => {
-    state.reviewTimelineFilter = event.target.value;
-    state.selectedReviewTimelineId = "";
-    loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
-  });
-  $("reviewTimelineRange").addEventListener("change", (event) => {
-    state.reviewTimelineRange = event.target.value;
-    state.selectedReviewTimelineId = "";
-    loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
-  });
-  $("reviewTimelineLimit").addEventListener("change", (event) => {
-    state.reviewTimelineLimit = event.target.value;
-    state.selectedReviewTimelineId = "";
-    loadReviewCenter().catch((error) => window.alert(error.message || "审核时间线加载失败"));
-  });
   $("readerSourceTabButton").addEventListener("click", () => switchTab("source"));
   $("readerBreakdownTabButton").addEventListener("click", () => switchTab("breakdown"));
   $("closeReadingButton").addEventListener("click", runCloseReading);
@@ -5839,10 +5534,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("breakdownApproveButton").addEventListener("click", () => reviewBreakdown("approve"));
   $("breakdownNeedsWorkButton").addEventListener("click", () => reviewBreakdown("needs_work"));
   $("agentFocusButton").addEventListener("click", () => {
-    document.querySelector(".inspector")?.classList.add("assistant-expanded");
+    openContextDrawer(state.activeTab === "media" ? "漫画属性" : "章节属性与流程");
     $("agentPanel").classList.remove("is-secondary-hidden");
     $("agentPanel").open = true;
-    $("agentPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  });
+  $("contextDrawerCloseButton").addEventListener("click", closeContextDrawer);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("contextDrawer").hidden) closeContextDrawer();
   });
   $("agentRefreshButton").addEventListener("click", loadAgent);
   $("agentPrimaryButton").addEventListener("click", runAgentPrimary);
@@ -5852,26 +5550,21 @@ document.addEventListener("DOMContentLoaded", () => {
     event.preventDefault();
     activateModule("media");
   });
-  $("saveConfigButton").addEventListener("click", saveConfig);
-  $("checkSettingsButton").addEventListener("click", checkSettingsHealth);
-  $("testTextModelButton").addEventListener("click", () => testModel("text"));
-  $("testImageModelButton").addEventListener("click", () => testModel("image"));
-  $("checkBackendButton").addEventListener("click", checkGenerationBackend);
-  $("startBackendButton").addEventListener("click", startGenerationBackend);
-  $("imageBackend").addEventListener("change", () => {
-    state.generationBackend = null;
-    updateImageBackendControls();
-    updateSettingsBadges();
-  });
   $("projectSelect").addEventListener("change", () => switchProject($("projectSelect").value));
   $("processNovelButton").addEventListener("click", processNovel);
   $("previewNovelButton").addEventListener("click", previewNovelImport);
+  $("novelFile").addEventListener("click", (event) => {
+    if (state.desktopInfo?.runtimeMode !== "local") return;
+    event.preventDefault();
+    selectDesktopNovelFile();
+  });
   $("novelFile").addEventListener("change", (event) => uploadNovelFile(event.target.files?.[0]));
   ["projectTitle", "projectSlug", "novelPath", "defaultPages", "encoding"].forEach((id) => {
     $(id)?.addEventListener("input", () => {
       state.importPreview = null;
       renderImportPreview();
       renderChapterImportPreview();
+      renderSettingsView();
     });
   });
   $("episodeSearch").addEventListener("input", renderEpisodes);

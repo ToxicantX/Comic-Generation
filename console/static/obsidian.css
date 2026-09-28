@@ -166,7 +166,7 @@ code {
   width: 100vw;
   height: 100vh;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 232px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   padding: 0;
   background: var(--bg);
@@ -252,7 +252,38 @@ code {
   border-top: 1px solid var(--line);
 }
 
-.module-switch button {
+.rail-chapter-context {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.rail-chapter-context[hidden] { display: none; }
+
+.rail-chapter-context .sidebar {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.rail-chapter-context .side-head {
+  align-items: center;
+  gap: 6px;
+}
+
+.rail-chapter-context .side-head h2 { font-size: 12px; }
+.rail-chapter-context .side-head p { font-size: 10px; }
+.rail-chapter-context .badge { max-width: 72px; overflow: hidden; text-overflow: ellipsis; }
+.rail-chapter-context .search,
+.rail-chapter-context .filter-select { width: 100%; min-width: 0; margin: 0; }
+
+.module-switch > .module-group > button {
   position: relative;
   width: 100%;
   min-height: 36px;
@@ -269,7 +300,7 @@ code {
   text-align: left;
 }
 
-.module-switch button > span {
+.module-switch > .module-group > button > span {
   width: 20px;
   display: grid;
   place-items: center;
@@ -277,19 +308,19 @@ code {
   font-size: 15px;
 }
 
-.module-switch button:hover {
+.module-switch > .module-group > button:hover {
   border-color: transparent;
   background: var(--surface-mid);
   color: #fff;
 }
 
-.module-switch button.active {
+.module-switch > .module-group > button.active {
   border-color: transparent;
   background: var(--accent-soft);
   color: #fff;
 }
 
-.module-switch button.active::before {
+.module-switch > .module-group > button.active::before {
   content: "";
   position: absolute;
   left: 0;
@@ -299,7 +330,7 @@ code {
   background: var(--accent-strong);
 }
 
-.module-switch button.active > span { color: #b9bbff; }
+.module-switch > .module-group > button.active > span { color: #b9bbff; }
 
 .workspace-frame {
   min-width: 0;
@@ -452,10 +483,22 @@ code {
 
 .module-view.active { display: block; }
 
+.vue-workspace-host {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.task-workspace .vue-workspace-host { overflow: hidden; }
+
 .workbench.module-view.active {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 320px;
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
+  gap: 0;
 }
 
 .workbench > .sidebar {
@@ -465,13 +508,13 @@ code {
 
 .workbench > .main-pane {
   height: auto;
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
 }
 
 .workbench > .inspector {
   max-height: none;
-  grid-column: 3;
+  grid-column: 2;
   grid-row: 1;
   display: flex;
   flex-direction: column;
@@ -649,6 +692,72 @@ code {
   overflow: auto;
 }
 
+.context-drawer[hidden] { display: none !important; }
+
+.context-drawer {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 312px;
+  max-width: 100%;
+  padding: 0;
+  gap: 0;
+  border-left: 1px solid var(--line);
+  background: #0b1426;
+  box-shadow: -12px 0 28px rgba(0, 0, 0, .24);
+  overflow: hidden;
+}
+
+.workbench > .context-drawer { grid-column: 1; }
+
+.context-drawer-header {
+  min-height: 56px;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #0d1629;
+}
+
+.context-drawer-header h2 {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.context-drawer-body {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.context-drawer-body > .panel { flex: 0 0 auto; }
+.context-drawer .agent-compact { display: none; }
+.context-drawer #agentPanel[open] { display: grid !important; }
+.context-drawer .agent-simulation { background: #0d1629; }
+.context-drawer .agent-metrics:empty,
+.context-drawer .approval-gates:empty,
+.context-drawer .agent-simulation:empty { display: none; }
+.context-drawer button.primary {
+  border-color: #4c51bf;
+  background: var(--accent-soft);
+  color: #e0e7ff;
+}
+
+.context-drawer button.primary:hover {
+  border-color: var(--accent);
+  background: #30347a;
+}
+
 .workflow-steps {
   border-radius: 6px;
 }
@@ -686,6 +795,17 @@ code {
 
 .reader-breakdown-preview,
 .reader-source-preview { color: #d7deee; }
+
+.source-overview,
+.source-page-card {
+  border-color: var(--line);
+  background: #0d1629;
+  color: var(--text);
+}
+
+.source-overview h3,
+.source-page-card h3,
+.source-page-card strong { color: var(--text); }
 
 .tabs,
 .qa-tabs,
@@ -1117,41 +1237,28 @@ code {
   background: var(--surface);
 }
 
-.app-toast {
-  border-color: var(--line-strong);
-  border-radius: 5px;
-  background: #111a2e;
-  color: var(--text);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, .25);
-}
-
-.app-toast p { color: #b7c1d4; }
-
-.app-dialog-overlay { background: rgba(3, 8, 18, .78); }
-
-.app-dialog {
-  border-color: var(--line-strong);
-  border-radius: 7px;
-  background: #111a2e;
-  color: var(--text);
-  box-shadow: 0 18px 46px rgba(0, 0, 0, .38);
-}
-
-.app-dialog-head,
-.app-dialog-actions { border-color: var(--line); }
-.app-dialog p { color: #b7c1d4; }
-.app-dialog-kind { border-color: #4c51bf; background: var(--accent-soft); color: #c7c8ff; }
-
 @media (min-width: 1760px) {
-  .shell { grid-template-columns: 240px minmax(0, 1fr); }
-  .workbench.module-view.active { grid-template-columns: 240px minmax(0, 1fr) 340px; }
+  .shell { grid-template-columns: 232px minmax(0, 1fr); }
   .settings-grid { grid-template-columns: repeat(3, minmax(300px, 1fr)); }
 }
 
 @media (max-width: 1240px) {
-  .shell { grid-template-columns: 216px minmax(0, 1fr); }
-  .workbench.module-view.active { grid-template-columns: 200px minmax(0, 1fr) 286px; }
+  .shell { grid-template-columns: 232px minmax(0, 1fr); }
   .topbar { grid-template-columns: minmax(190px, 260px) minmax(180px, 1fr) auto; column-gap: 8px; row-gap: 0; }
   .backend-state { display: none; }
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (min-width: 1440px) {
+  .workbench.module-view.active.context-drawer-open {
+    grid-template-columns: minmax(0, 1fr) 312px;
+  }
+
+  .workbench > .context-drawer {
+    position: static;
+    grid-column: 2;
+    width: auto;
+    max-width: none;
+    box-shadow: none;
+  }
 }

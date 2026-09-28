@@ -25,28 +25,46 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import db
 
-_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT_FOR_IMPORTS / "scripts"))
+
+def _environment_path(name: str, default: Path) -> Path:
+    value = str(os.environ.get(name) or "").strip()
+    return Path(value).expanduser().resolve() if value else default
+
+
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+RESOURCE_ROOT = _environment_path("COMIC_PIPELINE_RESOURCE_ROOT", _SOURCE_ROOT)
+DATA_ROOT = _environment_path("COMIC_PIPELINE_DATA_ROOT", RESOURCE_ROOT)
+SCRIPTS_DIR = RESOURCE_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
 from process_novel import build_chapter_index, fallback_chapter_index
 from image_provider import image_api_url, normalize_backend
 from text_model_client import chat_json, text_model_config
 from comfy_workflow_template import build_local_image_workflow, local_workflow_options
 
 
-ROOT = Path(__file__).resolve().parents[1]
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-CONFIG_PATH = Path(os.environ.get("COMIC_PIPELINE_CONFIG_PATH") or (ROOT / "config" / ".env"))
-TEXT_ENV_PATH = ROOT / "config" / "text.env"
-IMAGE_ENV_PATH = ROOT / "config" / "image.env"
-CONFIG_EXAMPLE_PATH = ROOT / "config" / ".env.example"
-TEXT_ENV_EXAMPLE_PATH = ROOT / "config" / "text.env.example"
-IMAGE_ENV_EXAMPLE_PATH = ROOT / "config" / "image.env.example"
-SCRIPTS_DIR = ROOT / "scripts"
-MANIFESTS_DIR = ROOT / "manifests"
-PROJECT_MANIFESTS_ROOT = MANIFESTS_DIR / "projects"
-NOVELS_DIR = ROOT / "novels"
-BACKUPS_DIR = ROOT / "backups"
-LOG_DIR = ROOT / "logs"
+ROOT = RESOURCE_ROOT
+STATIC_DIR = RESOURCE_ROOT / "console" / "static"
+CONFIG_DIR = DATA_ROOT / "config"
+CONFIG_PATH = _environment_path("COMIC_PIPELINE_CONFIG_PATH", CONFIG_DIR / ".env")
+TEXT_ENV_PATH = _environment_path("COMIC_PIPELINE_TEXT_ENV_PATH", CONFIG_DIR / "text.env")
+IMAGE_ENV_PATH = _environment_path("COMIC_PIPELINE_IMAGE_ENV_PATH", CONFIG_DIR / "image.env")
+CONFIG_EXAMPLE_PATH = RESOURCE_ROOT / "config" / ".env.example"
+TEXT_ENV_EXAMPLE_PATH = RESOURCE_ROOT / "config" / "text.env.example"
+IMAGE_ENV_EXAMPLE_PATH = RESOURCE_ROOT / "config" / "image.env.example"
+MANIFESTS_DIR = _environment_path("COMIC_PIPELINE_MANIFEST_DIR", DATA_ROOT / "manifests")
+PROJECT_MANIFESTS_ROOT = _environment_path("COMIC_PIPELINE_PROJECTS_DIR", MANIFESTS_DIR / "projects")
+NOVELS_DIR = _environment_path("COMIC_PIPELINE_NOVELS_DIR", DATA_ROOT / "novels")
+BACKUPS_DIR = _environment_path("COMIC_PIPELINE_BACKUPS_DIR", DATA_ROOT / "backups")
+LOG_DIR = _environment_path("COMIC_PIPELINE_LOG_DIR", DATA_ROOT / "logs")
+WORKFLOWS_RESOURCE_DIR = RESOURCE_ROOT / "workflows"
+WORKFLOW_TEMPLATES_DIR = WORKFLOWS_RESOURCE_DIR / "comic"
+GENERATED_WORKFLOWS_DIR = _environment_path(
+    "COMIC_PIPELINE_GENERATED_WORKFLOWS_DIR",
+    DATA_ROOT / "workflows" / "comic",
+)
+OUTPUT_ROOT = _environment_path("COMIC_PIPELINE_OUTPUT_ROOT", DATA_ROOT / "output" / "ComicPipeline")
+COMFY_OUTPUT_ROOT = _environment_path("COMIC_PIPELINE_COMFY_OUTPUT_ROOT", DATA_ROOT / "output")
+DEFAULT_NOVEL_PATH = _environment_path("COMIC_PIPELINE_NOVEL_PATH", DATA_ROOT / "novel.txt")
 RUN_SCRIPT = SCRIPTS_DIR / "run_comic_episode_pipeline.ps1"
 RUN_IMAGE_WORKFLOW_SCRIPT = SCRIPTS_DIR / "run_image_workflow_and_wait.ps1"
 IMAGE_PROVIDER_SCRIPT = SCRIPTS_DIR / "image_provider.py"
@@ -55,7 +73,7 @@ PROCESS_NOVEL_SCRIPT = SCRIPTS_DIR / "process_novel.py"
 CLOSE_READING_SCRIPT = SCRIPTS_DIR / "refine_comic_episode_close_reading.py"
 EPISODE_PIPELINE_SCRIPT = SCRIPTS_DIR / "run_comic_episode_pipeline.py"
 DEFAULT_PROJECT_SLUG = "sou_shen_ji"
-GENERATED_ASSET_WORKFLOW_DIR = ROOT / "workflows" / "comic" / "generated_assets"
+GENERATED_ASSET_WORKFLOW_DIR = GENERATED_WORKFLOWS_DIR / "generated_assets"
 MAX_NOVEL_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_ASSET_BATCH_SIZE = 20
 MAX_BACKUP_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -63,10 +81,12 @@ MAX_BACKUP_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_BACKUP_FILES = 20000
 ALLOWED_NOVEL_EXTENSIONS = {".txt", ".md", ".text", ".novel"}
 CONSOLE_PROTECTED_CONFIG_KEYS = {
+    "COMIC_PIPELINE_DATABASE_URL",
     "COMIC_PIPELINE_TEXT_ENV_PATH",
     "COMIC_PIPELINE_IMAGE_ENV_PATH",
     "COMIC_PIPELINE_PYTHON_PATH",
 }
+PUBLIC_HIDDEN_CONFIG_KEYS = {"COMIC_PIPELINE_DATABASE_URL"}
 
 PIPELINE_KEYS = [
     "COMIC_PIPELINE_WORKSPACE",
@@ -106,9 +126,9 @@ DEFAULTS = {
     "COMIC_PIPELINE_WORKSPACE": str(ROOT),
     "COMIC_PIPELINE_COMFY_ROOT": str(ROOT / "ComfyUI"),
     "COMIC_PIPELINE_COMFY_URL": "http://127.0.0.1:8188",
-    "COMIC_PIPELINE_OUTPUT_ROOT": str(ROOT / "output" / "ComicPipeline"),
-    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(ROOT / "output"),
-    "COMIC_PIPELINE_NOVEL_PATH": str(ROOT / "novel.txt"),
+    "COMIC_PIPELINE_OUTPUT_ROOT": str(OUTPUT_ROOT),
+    "COMIC_PIPELINE_COMFY_OUTPUT_ROOT": str(COMFY_OUTPUT_ROOT),
+    "COMIC_PIPELINE_NOVEL_PATH": str(DEFAULT_NOVEL_PATH),
     "COMIC_PIPELINE_TEXT_ENV_PATH": str(TEXT_ENV_PATH),
     "COMIC_PIPELINE_IMAGE_ENV_PATH": str(IMAGE_ENV_PATH),
     "COMIC_PIPELINE_IMAGE_BACKEND": "direct_api",
@@ -283,13 +303,16 @@ def validate_local_template_config(config: dict) -> None:
         raise ValueError("COMIC_PIPELINE_COMFY_CONTROLNET_START and END must satisfy 0 <= start < end <= 1")
 
 
-def provider_env_state(path: Path) -> dict:
+def provider_env_state(path: Path, secret_env_name: str) -> dict:
     values = read_env(path)
     return {
         "path": str(path),
         "exists": path.is_file(),
         "OPENAI_BASE_URL": values.get("OPENAI_BASE_URL", ""),
-        "OPENAI_API_KEY_CONFIGURED": bool(values.get("OPENAI_API_KEY", "").strip()),
+        "OPENAI_API_KEY_CONFIGURED": bool(
+            str(os.environ.get(secret_env_name) or "").strip()
+            or values.get("OPENAI_API_KEY", "").strip()
+        ),
     }
 
 
@@ -528,15 +551,25 @@ def sync_project_from_manifests(project: dict) -> None:
 
 def config_snapshot() -> dict:
     config = runtime_config()
-    text = provider_env_state(Path(config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH))
-    image = provider_env_state(Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH))
+    text = provider_env_state(
+        Path(config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH),
+        "COMIC_PIPELINE_TEXT_API_KEY",
+    )
+    image = provider_env_state(
+        Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH),
+        "COMIC_PIPELINE_IMAGE_API_KEY",
+    )
     database = db.status(config.get("COMIC_PIPELINE_DATABASE_URL", ""))
     return {
         "root": str(ROOT),
         "config_path": str(CONFIG_PATH),
         "text_env_path": config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or str(TEXT_ENV_PATH),
         "image_env_path": config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or str(IMAGE_ENV_PATH),
-        "config": {key: config.get(key, "") for key in PIPELINE_KEYS},
+        "config": {
+            key: config.get(key, "")
+            for key in PIPELINE_KEYS
+            if key not in PUBLIC_HIDDEN_CONFIG_KEYS
+        },
         "projects": {
             "active": active_project_slug(),
             "items": read_projects() if database.get("schema_ready") else [],
@@ -548,7 +581,7 @@ def config_snapshot() -> dict:
 
 
 def save_config(payload: dict) -> dict:
-    current = config_snapshot()["config"]
+    current = runtime_config()
     incoming = payload.get("config") or {}
     for key in CONSOLE_PROTECTED_CONFIG_KEYS:
         if key in incoming and str(incoming[key]).strip() != str(current.get(key) or "").strip():
@@ -562,6 +595,12 @@ def save_config(payload: dict) -> dict:
     validate_local_template_config(current)
     text_path = Path(current.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH)
     image_path = Path(current.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
+    desktop_managed_secrets = os.environ.get("COMIC_PIPELINE_DESKTOP_MANAGED_SECRETS") == "1"
+    if desktop_managed_secrets and any(
+        str((payload.get(provider) or {}).get("OPENAI_API_KEY") or "").strip()
+        for provider in ("text", "image")
+    ):
+        raise ValueError("桌面模式 API Key 必须由系统凭据存储管理")
     backups = {
         CONFIG_PATH: CONFIG_PATH.read_bytes() if CONFIG_PATH.is_file() else None,
         text_path: text_path.read_bytes() if text_path.is_file() else None,
@@ -981,16 +1020,20 @@ def panel_image_path(panel_id: str, project: dict | None = None) -> Path | None:
 
 def workflow_path_for_panel(panel_id: str) -> Path | None:
     safe = panel_id.lower()
-    candidates = [
-        ROOT / "workflows" / "comic" / f"{safe}_fallback_v001.json",
-        ROOT / "workflows" / "comic" / f"{safe}_image_v001.json",
-        ROOT / "workflows" / "comic" / f"{safe}_micro_fallback_v001.json",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    matches = sorted((ROOT / "workflows" / "comic").glob(f"{safe}_*.json"))
-    return matches[0] if matches else None
+    directories = list(dict.fromkeys((GENERATED_WORKFLOWS_DIR, WORKFLOW_TEMPLATES_DIR)))
+    for directory in directories:
+        candidates = [
+            directory / f"{safe}_fallback_v001.json",
+            directory / f"{safe}_image_v001.json",
+            directory / f"{safe}_micro_fallback_v001.json",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        matches = sorted(directory.glob(f"{safe}_*.json"))
+        if matches:
+            return matches[0]
+    return None
 
 
 def expected_output_from_workflow(workflow: dict, project: dict | None = None) -> str:
@@ -1057,16 +1100,21 @@ def normalize_path(value: str | Path) -> str:
 
 def existing_workflow_for_output(path: str | Path) -> Path | None:
     expected = normalize_path(path)
-    workflows_root = ROOT / "workflows"
-    if not workflows_root.is_dir():
-        return None
-    for workflow in workflows_root.rglob("*.json"):
-        try:
-            data = json.loads(workflow.read_text(encoding="utf-8-sig"))
-        except Exception:
+    roots = [WORKFLOWS_RESOURCE_DIR]
+    try:
+        GENERATED_WORKFLOWS_DIR.resolve().relative_to(WORKFLOWS_RESOURCE_DIR.resolve())
+    except ValueError:
+        roots.insert(0, GENERATED_WORKFLOWS_DIR)
+    for workflows_root in roots:
+        if not workflows_root.is_dir():
             continue
-        if normalize_path(expected_output_from_workflow(data)) == expected:
-            return workflow
+        for workflow in workflows_root.rglob("*.json"):
+            try:
+                data = json.loads(workflow.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            if normalize_path(expected_output_from_workflow(data)) == expected:
+                return workflow
     return None
 
 
@@ -5772,8 +5820,8 @@ def comfy_health() -> dict:
 
     text_key_path = Path(config.get("COMIC_PIPELINE_TEXT_ENV_PATH") or TEXT_ENV_PATH)
     image_key_path = Path(config.get("COMIC_PIPELINE_IMAGE_ENV_PATH") or IMAGE_ENV_PATH)
-    text = read_env(text_key_path)
-    image = read_env(image_key_path)
+    text = provider_env_state(text_key_path, "COMIC_PIPELINE_TEXT_API_KEY")
+    image = provider_env_state(image_key_path, "COMIC_PIPELINE_IMAGE_API_KEY")
     database = db.status(config.get("COMIC_PIPELINE_DATABASE_URL", ""))
     comfy_root_value = str(config.get("COMIC_PIPELINE_COMFY_ROOT") or "").strip()
     comfy_output_value = str(config.get("COMIC_PIPELINE_COMFY_OUTPUT_ROOT") or "").strip()
@@ -5793,7 +5841,7 @@ def comfy_health() -> dict:
         and comfy_output_exists
         and model_catalog.get("ok", False)
         if image_backend == "comfyui"
-        else bool(image.get("OPENAI_API_KEY", "").strip()) and output_root_exists
+        else bool(image.get("OPENAI_API_KEY_CONFIGURED")) and output_root_exists
     )
     return {
         "comfy_url": comfy_url,
@@ -5817,8 +5865,8 @@ def comfy_health() -> dict:
             "text_env": {"path": str(text_key_path), "exists": text_key_path.is_file()},
             "image_env": {"path": str(image_key_path), "exists": image_key_path.is_file()},
         },
-        "text_api_key_configured": bool(text.get("OPENAI_API_KEY", "").strip()),
-        "image_api_key_configured": bool(image.get("OPENAI_API_KEY", "").strip()),
+        "text_api_key_configured": bool(text.get("OPENAI_API_KEY_CONFIGURED")),
+        "image_api_key_configured": bool(image.get("OPENAI_API_KEY_CONFIGURED")),
         "database": database,
     }
 
@@ -6079,8 +6127,13 @@ def allowed_file_roots() -> list[Path]:
     config = config_snapshot()["config"]
     roots = [
         ROOT,
+        DATA_ROOT,
         MANIFESTS_DIR,
+        PROJECT_MANIFESTS_ROOT,
+        NOVELS_DIR,
+        BACKUPS_DIR,
         LOG_DIR,
+        GENERATED_WORKFLOWS_DIR,
         output_root(),
         comfy_output_root(),
         Path(config.get("COMIC_PIPELINE_COMFY_ROOT", DEFAULTS["COMIC_PIPELINE_COMFY_ROOT"])),
@@ -6335,6 +6388,81 @@ def health_check_summary() -> dict:
     return {"ok": all(item.get("ok") for item in checks), "checks": checks, "settings": settings}
 
 
+def list_models_api(payload: dict) -> dict:
+    target = str(payload.get("target") or "").strip().lower()
+    if target not in {"text", "image"}:
+        raise ValueError("模型列表类型必须是 text 或 image")
+    result = {"ok": False, "target": target, "models": []}
+    config = runtime_config()
+    default_path = TEXT_ENV_PATH if target == "text" else IMAGE_ENV_PATH
+    provider = read_env(Path(config.get(f"COMIC_PIPELINE_{target.upper()}_ENV_PATH") or default_path))
+    base_url = str(payload.get("base_url", provider.get("OPENAI_BASE_URL", "")) or "").strip().rstrip("/")
+    api_key = (
+        str(payload.get("api_key") or "").strip()
+        or str(os.environ.get(f"COMIC_PIPELINE_{target.upper()}_API_KEY") or "").strip()
+        or str(provider.get("OPENAI_API_KEY") or "").strip()
+    )
+    if not base_url or not api_key:
+        return result | {"message": "请配置对应的接口地址和 API Key，也可手动输入模型名称。"}
+    try:
+        parsed = urlparse(base_url)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+                or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError("invalid provider URL")
+        parsed.port
+        if any(char in base_url + api_key for char in "\r\n"):
+            raise ValueError("invalid provider configuration")
+    except ValueError:
+        return result | {"message": "接口地址或密钥格式不正确，可手动输入模型名称。"}
+    for suffix in ("/models", "/chat/completions", "/responses", "/images/generations", "/images/edits"):
+        if base_url.endswith(suffix):
+            base_url = base_url[:-len(suffix)]
+            break
+    request = urllib.request.Request(
+        image_api_url(base_url, "models"),
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json", "User-Agent": "ComicPipeline/2.0"},
+        method="GET",
+    )
+
+    # Do not forward provider credentials to a redirected host.
+    class NoModelListRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        with urllib.request.build_opener(NoModelListRedirect()).open(request, timeout=20) as response:
+            body = response.read(2 * 1024 * 1024 + 1)
+        if len(body) > 2 * 1024 * 1024:
+            raise ValueError("model list too large")
+        data = json.loads(body)
+        entries = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("invalid model list")
+        models = sorted({
+            item["id"].strip() for item in entries
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+            and item["id"].strip() and len(item["id"]) <= 256
+            and not any(ord(char) < 32 for char in item["id"])
+        }, key=str.casefold)
+        if not models:
+            return result | {"message": "接口未返回可选模型，可手动输入模型名称。"}
+        return {"ok": True, "target": target, "models": models, "message": f"已获取 {len(models)} 个模型"}
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        messages = {
+            401: "API Key 无效或已失效", 403: "无权读取模型列表",
+            404: "供应商不支持模型列表或接口地址不正确", 429: "请求过于频繁，请稍后重试",
+        }
+        message = messages.get(exc.code, "供应商未能返回模型列表")
+        return result | {"message": f"{message}（HTTP {exc.code}），可手动输入模型名称。"}
+    except (urllib.error.URLError, OSError) as exc:
+        timeout = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+        message = "获取模型列表超时" if timeout else "无法连接模型接口"
+        return result | {"message": f"{message}，可重试或手动输入模型名称。"}
+    except (ValueError, UnicodeError):
+        return result | {"message": "接口返回的模型列表格式不正确，可手动输入模型名称。"}
+
+
 def call_text_model_test(model: str, text_env_path: str, timeout: int = 30) -> dict:
     config = text_model_config({
         "COMIC_PIPELINE_TEXT_MODEL": model,
@@ -6354,7 +6482,10 @@ def call_text_model_test(model: str, text_env_path: str, timeout: int = 30) -> d
 
 def call_image_model_test(model: str, base_url: str, image_env_path: str, timeout: int = 120) -> dict:
     image_env = read_env(Path(image_env_path))
-    api_key = str(image_env.get("OPENAI_API_KEY") or "").strip()
+    api_key = (
+        str(os.environ.get("COMIC_PIPELINE_IMAGE_API_KEY") or "").strip()
+        or str(image_env.get("OPENAI_API_KEY") or "").strip()
+    )
     if not api_key:
         raise RuntimeError("图片生成 API Key 未配置")
     url = image_api_url(str(base_url or "").strip(), "images/generations")
@@ -9432,7 +9563,9 @@ def import_project_backup_api(payload: dict) -> dict:
         raise ValueError("备份缺少源项目标识")
     target_title = str(payload.get("target_title") or f"{source_project.get('title') or source_slug}（导入）").strip()
     target_manifest_dir = PROJECT_MANIFESTS_ROOT / target_slug
-    target_output_dir = Path(runtime_config().get("COMIC_PIPELINE_OUTPUT_ROOT") or (ROOT / "output")) / "Imported" / target_slug
+    target_output_dir = Path(
+        runtime_config().get("COMIC_PIPELINE_OUTPUT_ROOT") or DEFAULTS["COMIC_PIPELINE_OUTPUT_ROOT"]
+    ) / "Imported" / target_slug
     source_prefixes = {source_slug, slug_token(source_slug), slug_token(source_slug).lower()}
     if source_project.get("legacy"):
         source_prefixes.update({"ssj_comic", "SSJ_COMIC", "sou_shen_ji"})
@@ -10677,6 +10810,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(health_check_summary())
             if parsed.path == "/api/settings/test-model":
                 return self.send_json(test_model_api(payload))
+            if parsed.path == "/api/settings/models":
+                return self.send_json(list_models_api(payload))
             if parsed.path == "/api/generation-backend/start":
                 return self.send_json(start_generation_backend_api(payload), status=202)
             if parsed.path == "/api/file-action":

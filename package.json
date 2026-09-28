@@ -1,0 +1,38 @@
+{
+  "name": "comic-generation-desktop",
+  "version": "1.1.0",
+  "private": true,
+  "description": "漫画流水线 Windows 桌面客户端",
+  "author": "ToxicantX",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "frontend:build": "vite build && node scripts/assert_frontend_build.mjs",
+    "frontend:dev": "vite build --watch",
+    "frontend:typecheck": "vue-tsc --noEmit -p tsconfig.frontend.json",
+    "frontend:test": "vitest run",
+    "frontend:check": "npm run frontend:typecheck && npm run frontend:test && npm run frontend:build",
+    "runtime:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_windows_runtime.ps1",
+    "desktop:dev": "npm run frontend:build && electron .",
+    "desktop:dist:win": "npm run frontend:build && npm run runtime:prepare && electron-builder --config electron-builder.yml --win --x64 --publish never",
+    "desktop:test": "node --test desktop/tests/*.test.cjs",
+    "test": "npm run frontend:check && npm run desktop:test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/test-utils": "^2.5.1",
+    "electron": "44.4.5",
+    "electron-builder": "^26.15.3",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.2",
+    "vue": "^3.5.43",
+    "vue-tsc": "^3.3.11",
+    "yaml": "^2.9.1"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

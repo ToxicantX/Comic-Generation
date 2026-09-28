@@ -1,5 +1,25 @@
 # Comic Pipeline
 
+## Windows 桌面版
+
+桌面版采用 Electron 作为窗口与运行时编排层，继续复用现有 Python 控制台、PostgreSQL 和漫画流水线。开发模式会先检查 `http://127.0.0.1:8199`，后台未运行时使用 Docker Compose 回退；打包后的应用改用随包 Python 和 embedded PostgreSQL，不要求最终用户安装 Docker Desktop。
+
+```powershell
+npm install
+npm run frontend:check
+npm run desktop:test
+npm run desktop:dev
+npm run desktop:dist:win
+```
+
+桌面界面采用渐进迁移策略：保留现有 Python 业务层和 Electron 容器，新界面模块使用 Vue 3、TypeScript 与 Vite。`npm run desktop:dev` 会先构建前端资源；Docker 镜像也会在独立 Node 构建阶段生成资源，不需要在 Python 运行镜像中安装 Node.js。Windows 产物写入 `dist/windows/`，包括 NSIS 安装包、Portable 包和解包测试目录。
+
+发行包的配置、日志、备份和加密密钥位于 `%APPDATA%/Comic Pipeline`，数据库位于 `%USERPROFILE%/.comic-pipeline/database`。文本与图片 API Key 通过 Electron `safeStorage` 保存并注入本地后台，不写入仓库、日志或 `/api/config`。`v1.1.0` 首版尚未签名，Windows 可能显示 SmartScreen 警告，发行与签名状态见 [`docs/windows-packaging.md`](docs/windows-packaging.md)。
+
+安装版启动后会从 GitHub Releases 检查新版本并在后台下载；下载完成后可在“设置 / 软件更新”中选择“重启并升级”，也可在正常退出应用时自动安装。开发模式和纯浏览器模式不会请求更新服务。Portable 包用于内部测试，正式自动升级以 NSIS 安装版为验收对象。
+
+完整范围、界面蓝图、数据迁移和发布门槛见 [`docs/desktop-migration-plan.md`](docs/desktop-migration-plan.md)。浏览器入口在迁移期间继续保留。
+
 独立漫画流水线包。目标是把小说拆解、人工审核、漫画生成、页面 QA、下一章循环从当前工作区中独立出来，后续可以复制到其他机器部署。
 
 图片生成长期支持两种后端，所有业务流程共用同一套 PostgreSQL 任务、审核、重试、版本备份、输出、拼版和 QA：
@@ -212,6 +232,7 @@ http://127.0.0.1:8199
 控制台提供：
 
 - 在左侧独立 `设置` 中分别配置小说处理模型、图片生成模型、两个 API Key、图片质量、生成后端、输出目录和 PostgreSQL。
+- 文本和图片模型均可点击 `获取模型`，从各自接口返回的列表中选择；密钥留空时使用对应的已保存密钥。获取列表不会保存配置或调用图片生成，选择后需点击 `保存设置`。供应商不支持 `/v1/models` 时，可选择 `手动输入`；列表中的模型是否支持文本或图片生成，需通过对应模型测试确认。
 - 按当前后端检查直连图片 API，或检查 ComfyUI 的 `object_info`、`extensions`、队列和关键路径。
 - 按小说隔离原文、章节拆解、全局设定、全局素材、生成结果、审核记录和任务。
 - 按阶段运行：小说导入与章节骨架、项目级设定扫描、全局素材确认、章节细读、生成审核、页面 QA、下一章循环。

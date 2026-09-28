@@ -25,6 +25,7 @@ docs/superpowers/
 
 manifests/projects/
 manifests/*_check.json
+manifests/*.json
 workflows/comic/ssj_*.json
 workflows/comic/ssj-*.json
 workflows/comic/*_fallback_v*.json
@@ -34,5 +35,6 @@ custom_nodes/comic_episode_pipeline_web.disabled/comic_previews/
 custom_nodes/comic_episode_pipeline_web.disabled/*.bak-*
 
 node_modules/
+console/static/vue/
 dist/
 build/

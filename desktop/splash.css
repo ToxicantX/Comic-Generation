@@ -1,0 +1,138 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, "Microsoft YaHei", "Segoe UI", sans-serif;
+  background: #0b1326;
+  color: #e7ecfb;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  background: #0b1326;
+}
+
+.startup-shell {
+  width: min(720px, calc(100vw - 64px));
+  display: grid;
+  gap: 36px;
+}
+
+.startup-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #697692;
+  background: #131b2e;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+h1,
+h2,
+p { margin: 0; }
+
+h1 { font-size: 18px; }
+.startup-brand p { margin-top: 3px; color: #9aa6bd; font-size: 12px; }
+
+.startup-content {
+  min-height: 250px;
+  padding: 28px;
+  border: 1px solid #263149;
+  background: #131b2e;
+}
+
+.startup-status-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 0 5px rgba(52, 211, 153, .12);
+}
+
+.status-dot.running { animation: pulse 1.2s ease-in-out infinite; }
+.status-dot.failed { background: #fb7185; box-shadow: 0 0 0 5px rgba(251, 113, 133, .12); }
+
+@keyframes pulse {
+  50% { opacity: .35; }
+}
+
+.eyebrow {
+  color: #818cf8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+h2 { margin-top: 4px; font-size: 22px; }
+
+#statusMessage {
+  margin-top: 28px;
+  color: #cbd5e1;
+  line-height: 1.65;
+}
+
+.status-detail {
+  max-height: 112px;
+  margin: 18px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #3b4863;
+  background: #091122;
+  color: #9aa6bd;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.failure-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid #3b4863;
+  border-radius: 4px;
+  background: #171f33;
+  color: #e7ecfb;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button.primary { border-color: #fff; background: #fff; color: #111827; }
+button:disabled { opacity: .45; cursor: wait; }
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  color: #78859d;
+  font-size: 11px;
+}
+
+.hidden { display: none !important; }

@@ -758,6 +758,47 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(config["COMIC_PIPELINE_DATABASE_URL"], "postgresql://env-host/db")
         self.assertEqual(config["COMIC_PIPELINE_COMFY_URL"], "http://file-host:8188")
 
+    def test_config_snapshot_never_exposes_database_credentials(self):
+        server = load_server_module()
+        config = dict(server.DEFAULTS)
+        config["COMIC_PIPELINE_DATABASE_URL"] = "postgresql://comic:database-secret@127.0.0.1:54329/comic_pipeline"
+
+        with patch.object(server, "runtime_config", return_value=config):
+            with patch.object(server.db, "status", return_value={"connected": True, "schema_ready": True}):
+                with patch.object(server, "active_project_slug", return_value="ssj"):
+                    with patch.object(server, "read_projects", return_value=[]):
+                        snapshot = server.config_snapshot()
+
+        self.assertNotIn("COMIC_PIPELINE_DATABASE_URL", snapshot["config"])
+        self.assertNotIn("database-secret", json.dumps(snapshot))
+
+    def test_save_config_rejects_database_url_changes_from_console(self):
+        server = load_server_module()
+        current = dict(server.DEFAULTS)
+        current["COMIC_PIPELINE_DATABASE_URL"] = "postgresql://comic:database-secret@127.0.0.1:54329/comic_pipeline"
+
+        with patch.object(server, "runtime_config", return_value=current):
+            with self.assertRaisesRegex(ValueError, "COMIC_PIPELINE_DATABASE_URL"):
+                server.save_config({"config": {"COMIC_PIPELINE_DATABASE_URL": "postgresql://other/db"}})
+
+    def test_desktop_mode_rejects_plaintext_provider_key_persistence(self):
+        server = load_server_module()
+
+        with patch.dict(os.environ, {"COMIC_PIPELINE_DESKTOP_MANAGED_SECRETS": "1"}, clear=False):
+            with patch.object(server, "runtime_config", return_value=dict(server.DEFAULTS)):
+                with self.assertRaisesRegex(ValueError, "系统凭据存储"):
+                    server.save_config({"text": {"OPENAI_API_KEY": "must-not-be-written"}})
+
+    def test_provider_state_detects_process_secret_without_exposing_it(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "text.env"
+            with patch.dict(os.environ, {"COMIC_PIPELINE_TEXT_API_KEY": "desktop-secret"}, clear=False):
+                state = server.provider_env_state(missing, "COMIC_PIPELINE_TEXT_API_KEY")
+
+        self.assertTrue(state["OPENAI_API_KEY_CONFIGURED"])
+        self.assertNotIn("desktop-secret", json.dumps(state))
+
     def test_save_config_writes_text_and_image_credentials_separately(self):
         server = load_server_module()
         writes = {}
