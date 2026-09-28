@@ -29,7 +29,7 @@ _ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT_FOR_IMPORTS / "scripts"))
 from process_novel import build_chapter_index, fallback_chapter_index
 from image_provider import image_api_url, normalize_backend
-from text_model_client import chat_json
+from text_model_client import chat_json, text_model_config
 from comfy_workflow_template import build_local_image_workflow, local_workflow_options
 
 
@@ -6198,29 +6198,20 @@ def health_check_summary() -> dict:
 
 
 def call_text_model_test(model: str, text_env_path: str, timeout: int = 30) -> dict:
-    previous = {
-        "COMIC_PIPELINE_TEXT_MODEL": os.environ.get("COMIC_PIPELINE_TEXT_MODEL"),
-        "COMIC_PIPELINE_TEXT_ENV_PATH": os.environ.get("COMIC_PIPELINE_TEXT_ENV_PATH"),
+    config = text_model_config({
+        "COMIC_PIPELINE_TEXT_MODEL": model,
+        "COMIC_PIPELINE_TEXT_ENV_PATH": text_env_path,
+    })
+    started = time.time()
+    result = chat_json([
+        {"role": "system", "content": "只返回 JSON，不要解释。"},
+        {"role": "user", "content": "返回 JSON：{\"ok\":true,\"purpose\":\"settings_model_test\"}"},
+    ], temperature=0, timeout=timeout, config=config)
+    return {
+        "ok": True,
+        "elapsed_seconds": round(time.time() - started, 2),
+        "response": result,
     }
-    try:
-        os.environ["COMIC_PIPELINE_TEXT_MODEL"] = model
-        os.environ["COMIC_PIPELINE_TEXT_ENV_PATH"] = text_env_path
-        started = time.time()
-        result = chat_json([
-            {"role": "system", "content": "只返回 JSON，不要解释。"},
-            {"role": "user", "content": "返回 JSON：{\"ok\":true,\"purpose\":\"settings_model_test\"}"},
-        ], temperature=0, timeout=timeout)
-        return {
-            "ok": True,
-            "elapsed_seconds": round(time.time() - started, 2),
-            "response": result,
-        }
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def call_image_model_test(model: str, base_url: str, image_env_path: str, timeout: int = 120) -> dict:
@@ -8007,31 +7998,12 @@ def evidence_for_model(candidate: dict, max_items: int = 8, max_chars: int = 180
     return compact_text("\n".join(lines), max_chars)
 
 
-def call_setting_prompt_model(messages: list[dict]) -> dict:
-    config = runtime_config()
-    keys = [
-        "COMIC_PIPELINE_TEXT_MODEL",
-        "COMIC_PIPELINE_TEXT_ENV_PATH",
-        "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT",
-        "COMIC_PIPELINE_TEXT_MODEL_STREAM",
-    ]
-    previous = {key: os.environ.get(key) for key in keys}
-    try:
-        for key in keys:
-            value = str(config.get(key) or "").strip()
-            if value:
-                os.environ[key] = value
-        timeout = int(str(config.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT") or "300"))
-        return chat_json(messages, temperature=0.15, timeout=timeout)
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+def call_setting_prompt_model(messages: list[dict], project: dict | None = None) -> dict:
+    config = effective_config(project) if project is not None else runtime_config()
+    return chat_json(messages, temperature=0.15, config=text_model_config(config))
 
 
-def ai_enhance_setting_candidate(setting: dict, candidate: dict) -> tuple[dict, dict]:
+def ai_enhance_setting_candidate(setting: dict, candidate: dict, project: dict | None = None) -> tuple[dict, dict]:
     evidence = evidence_for_model(candidate)
     if not evidence:
         return candidate, {
@@ -8069,7 +8041,7 @@ def ai_enhance_setting_candidate(setting: dict, candidate: dict) -> tuple[dict, 
             ),
         },
     ]
-    result = call_setting_prompt_model(messages)
+    result = call_setting_prompt_model(messages, project)
     enhanced = {**candidate}
     aliases = result.get("aliases") if isinstance(result.get("aliases"), list) else candidate.get("aliases") or []
     chapter_numbers = result.get("chapter_numbers") if isinstance(result.get("chapter_numbers"), list) else candidate.get("chapter_numbers") or []
@@ -8154,7 +8126,8 @@ def refresh_setting_prompt_api(setting_id: int, payload: dict) -> dict:
     }
     if extraction_mode == "ai":
         try:
-            candidate, enhancement = ai_enhance_setting_candidate(current, candidate)
+            project = db.get_project(database_url(), project_slug) if project_slug else None
+            candidate, enhancement = ai_enhance_setting_candidate(current, candidate, project)
         except Exception as exc:
             enhancement = {
                 "requested": True,
@@ -8284,7 +8257,7 @@ def ai_discover_setting_candidates(project: dict, chapters: list[dict], limit: i
                         },
                     }, ensure_ascii=False),
                 },
-            ])
+            ], project)
             report["used_count"] += 1
         except Exception as exc:
             report["error_count"] += 1
@@ -8479,7 +8452,7 @@ def ai_enhance_setting_scan_candidates(project: dict, candidates: list[dict], li
             "project_title": project_title,
         }
         try:
-            enhanced, item_enhancement = ai_enhance_setting_candidate(setting, candidate)
+            enhanced, item_enhancement = ai_enhance_setting_candidate(setting, candidate, project)
             if item_enhancement.get("used"):
                 enhancement["used_count"] += 1
             else:

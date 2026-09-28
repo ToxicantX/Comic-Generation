@@ -33,6 +33,24 @@ class FakeStreamResponse:
 
 
 class TextModelClientTest(unittest.TestCase):
+    def test_chat_json_keeps_explicit_project_configs_isolated(self):
+        client = load_client_module()
+        sent = []
+
+        def fake_urlopen(request, timeout):
+            sent.append(json.loads(request.data))
+            return FakeStreamResponse([b'data: {"choices":[{"delta":{"content":"{\\"ok\\":true}"}}]}\n\n'])
+
+        with patch.object(client, "text_model_config", side_effect=AssertionError("must use explicit config")):
+            with patch.object(client.urllib.request, "urlopen", side_effect=fake_urlopen):
+                for model in ("novel-a-model", "novel-b-model"):
+                    result = client.chat_json([{"role": "user", "content": "test"}], config={
+                        "model": model, "base_url": "https://example.test/v1", "api_key": "test-key",
+                        "timeout": 90, "stream": True,
+                    })
+                    self.assertEqual(result["_model"], model)
+        self.assertEqual([item["model"] for item in sent], ["novel-a-model", "novel-b-model"])
+
     def test_chat_json_sends_application_user_agent(self):
         client = load_client_module()
         chunks = [b'data: {"choices":[{"delta":{"content":"{\\"ok\\":true}"}}]}\n\n', b"data: [DONE]\n\n"]

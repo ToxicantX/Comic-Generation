@@ -35,22 +35,27 @@ def parse_int(value: str | int | None, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def text_model_config() -> dict:
-    env_path = os.getenv("COMIC_PIPELINE_TEXT_ENV_PATH") or ""
+def text_model_config(overrides: dict | None = None) -> dict:
+    overrides = overrides or {}
+
+    def value(key: str, default: str = ""):
+        return overrides.get(key, os.getenv(key, default))
+
+    env_path = value("COMIC_PIPELINE_TEXT_ENV_PATH") or ""
     env_values = read_env(env_path) if env_path else {}
     return {
-        "model": os.getenv("COMIC_PIPELINE_TEXT_MODEL", "").strip(),
+        "model": value("COMIC_PIPELINE_TEXT_MODEL").strip(),
         "base_url": (
-            os.getenv("COMIC_PIPELINE_TEXT_BASE_URL")
+            value("COMIC_PIPELINE_TEXT_BASE_URL")
             or env_values.get("OPENAI_BASE_URL", "")
         ).strip().rstrip("/"),
         "api_key": (
-            os.getenv("COMIC_PIPELINE_TEXT_API_KEY")
+            value("COMIC_PIPELINE_TEXT_API_KEY")
             or env_values.get("OPENAI_API_KEY", "")
         ).strip(),
         "env_path": env_path,
-        "timeout": parse_int(os.getenv("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT"), 300),
-        "stream": parse_bool(os.getenv("COMIC_PIPELINE_TEXT_MODEL_STREAM"), True),
+        "timeout": parse_int(value("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT"), 300),
+        "stream": parse_bool(value("COMIC_PIPELINE_TEXT_MODEL_STREAM"), True),
     }
 
 
@@ -87,8 +92,9 @@ def chat_json(
     temperature: float = 0.2,
     timeout: int | None = None,
     stream: bool | None = None,
+    config: dict | None = None,
 ) -> dict:
-    config = text_model_config()
+    config = config if config is not None else text_model_config()
     if not is_configured(config):
         raise RuntimeError("text model is not configured")
     timeout = parse_int(timeout, int(config.get("timeout") or 300))

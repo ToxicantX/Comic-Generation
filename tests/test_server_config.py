@@ -27,6 +27,22 @@ def load_server_module():
 
 
 class RuntimeConfigTest(unittest.TestCase):
+    def test_setting_model_uses_project_config_without_mutating_environment(self):
+        server = load_server_module()
+        project = {"slug": "novel_a"}
+        with patch.dict(os.environ, {"COMIC_PIPELINE_TEXT_MODEL": "global-model"}):
+            with patch.object(server, "effective_config", return_value={
+                "COMIC_PIPELINE_TEXT_MODEL": "project-model",
+                "COMIC_PIPELINE_TEXT_ENV_PATH": "/config/text.env",
+                "COMIC_PIPELINE_TEXT_MODEL_TIMEOUT": "90",
+                "COMIC_PIPELINE_TEXT_MODEL_STREAM": "true",
+            }) as config_mock:
+                with patch.object(server, "chat_json", return_value={"ok": True}) as chat_mock:
+                    server.call_setting_prompt_model([{"role": "user", "content": "test"}], project)
+                    config_mock.assert_called_once_with(project)
+                    self.assertEqual(chat_mock.call_args.kwargs["config"]["model"], "project-model")
+                    self.assertEqual(os.environ["COMIC_PIPELINE_TEXT_MODEL"], "global-model")
+
     def test_database_url_uses_global_runtime_config(self):
         server = load_server_module()
 
@@ -2077,13 +2093,11 @@ class RuntimeConfigTest(unittest.TestCase):
             "_model": "test-text-model",
         }
 
-        captured_env = {}
+        captured_config = {}
 
         def fake_chat_json(*_args, **_kwargs):
-            captured_env["model"] = os.environ.get("COMIC_PIPELINE_TEXT_MODEL")
-            captured_env["env_path"] = os.environ.get("COMIC_PIPELINE_TEXT_ENV_PATH")
-            captured_env["timeout"] = os.environ.get("COMIC_PIPELINE_TEXT_MODEL_TIMEOUT")
-            captured_env["stream"] = os.environ.get("COMIC_PIPELINE_TEXT_MODEL_STREAM")
+            captured_config.update(_kwargs["config"])
+            self.assertNotIn("COMIC_PIPELINE_TEXT_MODEL", os.environ)
             return model_result
 
         runtime = {
@@ -2098,7 +2112,7 @@ class RuntimeConfigTest(unittest.TestCase):
                 with patch.object(server, "runtime_config", return_value=runtime):
                     with patch.object(server.db, "get_setting_item", return_value=setting):
                         with patch.object(server.db, "list_chapters", return_value=chapters):
-                            with patch.object(server, "chat_json", side_effect=fake_chat_json) as chat_mock:
+                            with patch.object(server.db, "get_project", return_value={"slug": setting["project_slug"]}), patch.object(server, "chat_json", side_effect=fake_chat_json) as chat_mock:
                                 result = server.refresh_setting_prompt_api(44, {
                                     "mode": "overwrite",
                                     "extraction_mode": "ai",
@@ -2111,10 +2125,10 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("大荒少年", result["editor_payload"]["aliases"])
         self.assertEqual(result["editor_payload"]["importance"], "core")
         self.assertTrue(chat_mock.called)
-        self.assertEqual(captured_env["model"], "configured-novel-model")
-        self.assertEqual(captured_env["env_path"], "/tmp/text.env")
-        self.assertEqual(captured_env["timeout"], "333")
-        self.assertEqual(captured_env["stream"], "true")
+        self.assertEqual(captured_config["model"], "configured-novel-model")
+        self.assertEqual(captured_config["env_path"], "/tmp/text.env")
+        self.assertEqual(captured_config["timeout"], 333)
+        self.assertTrue(captured_config["stream"])
 
     def test_refresh_setting_prompt_ai_mode_uses_fallback_chapter_evidence(self):
         server = load_server_module()
@@ -2164,7 +2178,7 @@ class RuntimeConfigTest(unittest.TestCase):
             }):
                 with patch.object(server.db, "get_setting_item", return_value=setting):
                     with patch.object(server.db, "list_chapters", return_value=chapters):
-                        with patch.object(server, "chat_json", side_effect=fake_chat_json) as chat_mock:
+                        with patch.object(server.db, "get_project", return_value={"slug": setting["project_slug"]}), patch.object(server, "chat_json", side_effect=fake_chat_json) as chat_mock:
                             result = server.refresh_setting_prompt_api(45, {
                                 "mode": "overwrite",
                                 "extraction_mode": "ai",
