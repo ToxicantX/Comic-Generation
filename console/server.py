@@ -1619,6 +1619,17 @@ def classify_generation_issue(value: str) -> dict:
             "retry_hint": "可以重试",
             "cooldown_seconds": 0,
         }
+    if "image aspect ratio mismatch" in lower:
+        sizes = re.search(r"requested (\d+x\d+), received (\d+x\d+)", text, re.IGNORECASE)
+        detail = f"请求 {sizes[1]}，实际返回 {sizes[2]}。" if sizes else ""
+        return {
+            "type": "image_aspect_ratio_mismatch",
+            "severity": "retryable",
+            "message": f"图片模型返回的画面比例不匹配。{detail}已停止拼版并保留原图。",
+            "action": "在分镜提示词中明确竖幅或横幅构图后，只重试当前分镜；不要直接裁切或拉伸画面。",
+            "retry_hint": "调整构图后单格重试",
+            "cooldown_seconds": 0,
+        }
     if "b64_json" in lower:
         return {
             "type": "empty_image_response",
@@ -1739,6 +1750,7 @@ def generation_diagnostics_from_result(result: dict | None) -> dict:
             "cooldown_seconds": int(classification.get("cooldown_seconds") or 0),
         })
 
+    add_issue(str(result.get("shot_id") or ""), result.get("error"))
     direct_runs = result.get("runs")
     if isinstance(direct_runs, list):
         for run in direct_runs:
@@ -2875,11 +2887,7 @@ def sync_and_record_job_output_versions(project: dict, episode_number: int, job:
             recorded.append(version)
     sync_result["versions_recorded"] = recorded
     if recorded:
-        approvals = db.get_approvals(database_url(), project["slug"], episode_number) or default_approval_state()
-        approvals.update({"generation": False, "qa": False, "next_episode": False})
-        db.save_approvals(database_url(), project["slug"], episode_number, approvals)
-        qa_result_path = project_manifest_dir(project) / f"{project_episode_stem(project, episode_number)}_pipeline_run.json"
-        qa_result_path.write_text(json.dumps({"completed": False, "stages": [], "invalidated_by": job.get("id", "")}), encoding="utf-8")
+        invalidate_episode_output_review(project, episode_number, str(job.get("id") or ""))
         sync_result["media"] = attach_output_db_state(project, sync_result["media"])
     return sync_result
 
@@ -3004,6 +3012,14 @@ def clean_output_quality_checks(value) -> tuple[list[dict], dict]:
     return checks, summary
 
 
+def invalidate_episode_output_review(project: dict, episode_number: int, source: str) -> None:
+    approvals = db.get_approvals(database_url(), project["slug"], episode_number) or default_approval_state()
+    approvals.update({"generation": False, "qa": False, "next_episode": False})
+    db.save_approvals(database_url(), project["slug"], episode_number, approvals)
+    qa_result_path = project_manifest_dir(project) / f"{project_episode_stem(project, episode_number)}_pipeline_run.json"
+    qa_result_path.write_text(json.dumps({"completed": False, "stages": [], "invalidated_by": source}), encoding="utf-8")
+
+
 def review_output_api(output_id: int, payload: dict) -> dict:
     ensure_database()
     before = db.get_generated_output(database_url(), output_id)
@@ -3024,6 +3040,12 @@ def review_output_api(output_id: int, payload: dict) -> dict:
     quality_checks, quality_summary = clean_output_quality_checks(payload.get("quality_checks"))
     if action == "approve" and (quality_summary["failed"] or quality_summary["unknown"]):
         raise ValueError("审核通过前必须确认全部质量检查项")
+    project = None
+    episode_number = int(before.get("chapter_number") or 0)
+    if action != "approve":
+        project = db.get_project(database_url(), before["project_slug"])
+        if not project or episode_number < 1:
+            raise ValueError("生成结果缺少所属作品或章节，无法撤销下游审核")
     saved = db.update_generated_output(database_url(), output_id, {
         "review_status": status,
         "metadata": {
@@ -3034,6 +3056,8 @@ def review_output_api(output_id: int, payload: dict) -> dict:
             "review_quality_summary": quality_summary,
         },
     })
+    if project:
+        invalidate_episode_output_review(project, episode_number, f"output:{output_id}:{action}")
     db.add_review(database_url(), saved["project_slug"], {
         "target_type": "generated_output",
         "target_id": saved["id"],

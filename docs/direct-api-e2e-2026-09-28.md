@@ -57,8 +57,9 @@ Final approval state:
 
 ## Verification
 
-- Windows: `python -m unittest discover -s tests -p 'test_*.py'`: 196 passed.
-- Docker: same unittest suite: 196 passed.
+- Initial two-chapter baseline: 196 tests passed on Windows and Docker.
+- Output-safety follow-up: `python -m unittest discover -s tests -p 'test_*.py'`:
+  205 passed on both Windows and Docker.
 - Python compilation, JavaScript syntax check, and `git diff --check`: passed.
 - `scripts/test_prompt_secret_hygiene.ps1 -SkipComfyProbe`: passed.
 - Negative HTTP tests rejected unreviewed generation, failed QA, and old QA
@@ -68,11 +69,48 @@ Final approval state:
   overlap, action hit-testing passed, preview images loaded at 1600x2400.
 - Local screenshots and images remain ignored runtime data, not repository assets.
 
+## Output Safety Follow-Up
+
+- Returning an individual output to needs-work, rejected, or pending review now
+  revokes generation, QA, and next-chapter gates for its own project and chapter.
+  Both individual and batch review routes use the same invalidation. Draft and
+  asset approvals, other output reviews, and review history remain unchanged.
+- A returned output invalidates the canonical QA result. Reapproving the image
+  and generation gate does not permit reuse of the old QA report.
+- Direct API image saving validates aspect ratio before replacing the target
+  file. A relative ratio difference over 2% is rejected; scaled images and minor
+  rounding remain accepted. Successful results record `actual_size` separately
+  from the requested `size`. `auto` does not impose a ratio.
+- Ratio mismatch produces a Chinese task diagnostic with requested and actual
+  dimensions and guidance to retry only the affected panel after adjusting its
+  composition. No paid size-correction retry is added.
+- Live Docker HTTP verification on approved chapter 1 output 21 exercised all
+  three return actions, including batch pending review. Generation, QA, and
+  next-chapter approvals returned HTTP 400. Other projects and chapter 2 were
+  unchanged; panel and page SHA256 values were preserved. A media-inclusive
+  project backup was created before verification and retained locally.
+- After reapproval, old QA was still rejected. Fresh QA job
+  `1790571446633-af1dbaedbb-review` passed all five stages, and chapter 1 gates
+  were restored through the normal approval API.
+- A local HTTP fixture replayed the exact earlier Sunburst 1536x1024 response
+  into the real Docker regeneration subprocess for a 1024x1536 request. Job
+  `1790571556646-b9157088e5-regenerate` failed as expected, made one local HTTP
+  request and zero paid calls, restored the old panel with an identical SHA256,
+  and retained its output review and chapter approvals. This is response-replay
+  verification, not another live model generation.
+- Playwright confirmed the Chinese ratio diagnostic and retry guidance in the
+  task center. Screenshot: ignored local artifact
+  `output/playwright/ratio-safety-diagnostic.png`.
+- The earlier migration and optional ComfyUI tests were checked against their
+  live Notion records: isolated PostgreSQL restore/restart and real local-model
+  PNG generation passed on 2026-09-22. They were not repeated in this follow-up.
+
 ## Remaining Work
 
-- Automatically validate provider-returned aspect ratios before portrait assembly.
-- Revoke chapter gates when a previously approved individual output is later
-  changed to needs-work/rejected/pending; new-generation invalidation is fixed here.
 - Extend real acceptance to multiple panels/pages and longer chapter batches.
 - Project-Flow-Hub production publication remains separate from this acceptance.
+  Run `36378676397` passed tests/build/browser smoke but failed publication due
+  to a changed SSH host key. The public hostname could not be resolved on the
+  follow-up check. A trusted host-key confirmation and DNS recovery are required;
+  SSH verification was not disabled.
 - The current UI provides a fixed dark theme; no new light-theme support was added.

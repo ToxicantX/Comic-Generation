@@ -37,9 +37,9 @@ class FakeResponse:
         return False
 
 
-def png_base64() -> str:
+def png_base64(size=(8, 12)) -> str:
     buffer = io.BytesIO()
-    Image.new("RGB", (8, 12), "#336699").save(buffer, format="PNG")
+    Image.new("RGB", size, "#336699").save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
@@ -111,6 +111,7 @@ class ImageProviderTest(unittest.TestCase):
             self.assertEqual(result["backend"], "direct_api")
             self.assertEqual(result["output_path"], str(output_path))
             self.assertEqual(result["model"], "image-model")
+            self.assertEqual(result["actual_size"], "8x12")
             self.assertEqual(len(requests), 1)
             self.assertEqual(requests[0][0].get_header("User-agent"), "ComicPipeline/2.0")
             request_body = json.loads(requests[0][0].data.decode("utf-8"))
@@ -203,6 +204,43 @@ class ImageProviderTest(unittest.TestCase):
         module = load_module()
         with self.assertRaisesRegex(ValueError, "PNG"):
             module.generate_from_workflow("missing-workflow.json", "panel.jpg")
+
+    def test_generation_rejects_wrong_aspect_ratio_without_overwriting_or_retrying(self):
+        module = load_module()
+        for size in ((12, 8), (8, 8)):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                workflow_path = root / "workflow.json"
+                workflow_path.write_text(json.dumps({"prompt": {"1": {
+                    "class_type": "OpenAICompatibleImageGenerate",
+                    "inputs": {"prompt": "vertical comic panel", "size": "1024x1536"},
+                }}}), encoding="utf-8")
+                output_path = root / "panel.png"
+                previous = base64.b64decode(png_base64())
+                output_path.write_bytes(previous)
+                with patch.object(module, "image_config", return_value={"api_key": "test-key"}):
+                    with patch.object(module, "request_image", return_value=(base64.b64decode(png_base64(size)), [])) as request:
+                        with self.assertRaisesRegex(ValueError, f"aspect ratio mismatch.*1024x1536.*{size[0]}x{size[1]}.*retry"):
+                            module.generate_from_workflow(workflow_path, output_path)
+                request.assert_called_once()
+                self.assertEqual(output_path.read_bytes(), previous)
+                self.assertEqual(sorted(path.name for path in root.iterdir()), ["panel.png", "workflow.json"])
+
+    def test_image_save_accepts_scaled_ratio_and_small_rounding(self):
+        module = load_module()
+        for size in ((8, 12), (100, 151)):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as temp_dir:
+                output_path = Path(temp_dir) / "panel.png"
+                actual = module.save_image(base64.b64decode(png_base64(size)), output_path, "1024x1536")
+                self.assertEqual(actual, f"{size[0]}x{size[1]}")
+                with Image.open(output_path) as image:
+                    self.assertEqual(image.size, size)
+
+    def test_auto_image_size_does_not_impose_an_aspect_ratio(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "panel.png"
+            self.assertEqual(module.save_image(base64.b64decode(png_base64((12, 8))), output_path, "auto"), "12x8")
 
 
 if __name__ == "__main__":

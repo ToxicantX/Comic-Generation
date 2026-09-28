@@ -56,6 +56,7 @@ class OutputReviewVersionsTest(unittest.TestCase):
         self.addCleanup(stack.close)
         stack.enter_context(patch.object(self.server, "ensure_database"))
         stack.enter_context(patch.object(self.server, "database_url", return_value="mock-database"))
+        self.get_project = stack.enter_context(patch.object(self.server.db, "get_project", return_value=self.project))
         stack.enter_context(patch.object(self.server.db, "get_approvals", return_value={"draft": True, "assets": True, "generation": True, "qa": True, "next_episode": True}))
         self.save_approvals = stack.enter_context(patch.object(self.server.db, "save_approvals"))
         stack.enter_context(patch.object(self.server, "active_project", side_effect=AssertionError("project switched")))
@@ -191,6 +192,50 @@ class OutputReviewVersionsTest(unittest.TestCase):
 
     def test_failed_output_keeps_chapter_approval_unchanged(self):
         self.sync_job(self.job(status="failed"))
+        self.save_approvals.assert_not_called()
+
+    def test_returning_output_revokes_only_its_chapter_gates_and_stale_qa(self):
+        for action, status in (("needs_work", "needs_work"), ("reject", "rejected"), ("pending", "pending_review")):
+            with self.subTest(action=action):
+                self.save_approvals.reset_mock()
+                self.rows = deepcopy(self.original)
+                result = self.server.review_output_api(2, {"action": action, "comment": "Composition needs review"})
+                self.assertEqual(result["output"]["review_status"], status)
+                self.get_project.assert_called_with("mock-database", "novel_a")
+                self.save_approvals.assert_called_once()
+                _url, slug, episode, approvals = self.save_approvals.call_args.args
+                self.assertEqual((slug, episode), ("novel_a", 1))
+                self.assertTrue(approvals["draft"] and approvals["assets"])
+                self.assertFalse(approvals["generation"] or approvals["qa"] or approvals["next_episode"])
+                path = Path(self.project["manifest_dir"]) / f"{self.server.project_episode_stem(self.project, 1)}_pipeline_run.json"
+                published = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(published["invalidated_by"], f"output:2:{action}")
+                self.assertFalse(self.server.qa_report_ready({"texts": {"status_md": "old report"}, "pipeline_result": published}))
+                for output_id in (1, 3, 4, 5):
+                    self.assert_review_preserved(output_id)
+                self.assertEqual(self.versions, self.old_versions)
+                self.assertEqual(self.reviews[:len(self.old_reviews)], self.old_reviews)
+
+    def test_approving_single_output_does_not_approve_or_revoke_chapter(self):
+        checks = {key: "pass" for key, _label in self.server.OUTPUT_QUALITY_DIMENSIONS}
+        result = self.server.review_output_api(2, {"action": "approve", "quality_checks": checks})
+        self.assertEqual(result["output"]["review_status"], "approved")
+        self.save_approvals.assert_not_called()
+
+    def test_batch_returning_outputs_revokes_their_chapter_gates(self):
+        result = self.server.review_outputs_batch_api({"output_ids": [2, 3], "action": "needs_work", "comment": "Composition needs review"})
+        self.assertEqual(result["reviewed"], 2)
+        self.assertEqual(result["skipped"], [])
+        self.assertTrue(self.save_approvals.called)
+        for call in self.save_approvals.call_args_list:
+            self.assertEqual(call.args[1:3], ("novel_a", 1))
+            self.assertFalse(call.args[3]["generation"] or call.args[3]["qa"] or call.args[3]["next_episode"])
+
+    def test_returning_output_without_its_project_fails_before_editing(self):
+        self.get_project.return_value = None
+        with self.assertRaises(ValueError):
+            self.server.review_output_api(2, {"action": "pending"})
+        self.update.assert_not_called()
         self.save_approvals.assert_not_called()
 
     def test_page_assembly_without_new_panel_still_resets_page_review(self):

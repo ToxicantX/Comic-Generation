@@ -492,6 +492,23 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertIn("当前后端", issue["message"])
         self.assertNotIn("检查 ComfyUI 是否运行", issue["message"])
 
+    def test_image_aspect_ratio_diagnostic_is_actionable_in_chinese(self):
+        server = load_server_module()
+        raw = "Image aspect ratio mismatch: requested 1024x1536, received 1536x1024. Specify portrait composition and retry."
+        issue = server.classify_generation_issue(raw)
+        self.assertEqual(issue["type"], "image_aspect_ratio_mismatch")
+        self.assertIn("1024x1536", issue["message"])
+        self.assertIn("1536x1024", issue["message"])
+        self.assertIn("构图", issue["action"])
+
+    def test_single_regeneration_ratio_error_appears_in_job_diagnostics(self):
+        server = load_server_module()
+        raw = "Image aspect ratio mismatch: requested 1024x1536, received 1536x1024. Specify portrait composition and retry."
+        diagnostics = server.job_diagnostics({"stage": "regenerate"}, {"completed": False, "error": raw})
+        self.assertEqual(len(diagnostics["issues"]), 1)
+        self.assertEqual(diagnostics["issues"][0]["type"], "image_aspect_ratio_mismatch")
+        self.assertEqual(diagnostics["issues"][0]["raw"], raw)
+
     def test_direct_api_agent_findings_hide_optional_comfyui_paths(self):
         server = load_server_module()
         health = {

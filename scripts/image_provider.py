@@ -150,7 +150,7 @@ def generate_from_workflow(
     }
     references = reference_paths(str(inputs.get("reference_image_paths") or ""))
     image_bytes, attempts = request_image(config, request, references, timeout)
-    save_image(image_bytes, output_path)
+    actual_size = save_image(image_bytes, output_path, request["size"])
     return {
         "updated": datetime.now().isoformat(timespec="seconds"),
         "completed": True,
@@ -159,6 +159,7 @@ def generate_from_workflow(
         "output_path": str(output_path),
         "model": request["model"],
         "size": request["size"],
+        "actual_size": actual_size,
         "quality": request["quality"],
         "reference_count": len(references),
         "attempts": attempts,
@@ -409,13 +410,25 @@ def response_shape(data) -> str:
     return f"type={type(data).__name__}"
 
 
-def save_image(image_bytes: bytes, output_path: Path) -> None:
+def save_image(image_bytes: bytes, output_path: Path, expected_size: str = "") -> str:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with Image.open(io.BytesIO(image_bytes)) as image:
+            width, height = image.size
+            if expected_size and expected_size != "auto":
+                expected_width, expected_height = (int(value) for value in expected_size.split("x"))
+                if expected_width < 1 or expected_height < 1:
+                    raise ValueError("requested image dimensions must be positive")
+                relative_ratio_error = abs(width * expected_height / (height * expected_width) - 1)
+                if relative_ratio_error > 0.02:
+                    raise ValueError(
+                        f"Image aspect ratio mismatch: requested {expected_size}, received {width}x{height}. "
+                        "Specify portrait/landscape composition in the prompt and retry; the previous image was not overwritten."
+                    )
             image.convert("RGB").save(temporary, format="PNG")
         temporary.replace(output_path)
+        return f"{width}x{height}"
     finally:
         if temporary.exists():
             temporary.unlink()
