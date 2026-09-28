@@ -1489,6 +1489,91 @@ class RuntimeConfigTest(unittest.TestCase):
                     "content_base64": "not-read-when-target-exists",
                 })
 
+    def test_backup_import_migrates_plans_references_and_media(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_manifest = "C:/old/manifests/projects/source_book"
+            source_output = "G:/old/output/ComicPipeline"
+            episode_name = "source_book_episode01_pages.json"
+            asset_path = source_output + "/assets/source_book_hero.png"
+            panel_path = source_output + "/panels/SOURCE_BOOK_EP01_P001_PANEL01_v001.png"
+            plan = {
+                "episode_id": "SOURCE_BOOK_EP01",
+                "manifest_dir": source_manifest,
+                "asset_aliases": {"hero": asset_path.replace("/", "\\")},
+                "pages": [{"page_id": "SOURCE_BOOK_EP01_P001", "panels": [{
+                    "panel_id": "SOURCE_BOOK_EP01_P001_PANEL01",
+                    "prompt": "source_book appears in the unchanged novel text",
+                }]}],
+            }
+            series = {"episodes": [{"episode_id": "SOURCE_BOOK_EP01",
+                                    "episode_plan_path": source_manifest + "/" + episode_name}]}
+            data = {
+                "project": {"slug": "source_book", "manifest_dir": source_manifest,
+                            "novel_path": "C:/old/novels/source.txt",
+                            "series_plan_path": source_manifest + "/source_book_comic_series_plan.json",
+                            "project_config": {"output_root": source_output, "image_model": "test-image"}},
+                "episodes": [{"episode_number": 1, "episode_code": "SOURCE_BOOK_EP01",
+                              "episode_plan_path": source_manifest + "/" + episode_name, "raw": {}}],
+                "assets": [{"id": 10, "file_path": asset_path}],
+                "outputs": [{"id": 20, "output_type": "panel", "file_path": panel_path,
+                             "panel_id": "SOURCE_BOOK_EP01_P001_PANEL01", "page_id": "SOURCE_BOOK_EP01_P001"}],
+            }
+            specs = [
+                ("files/novel/source.txt", b"novel", "project", "source_book", "novel_path"),
+                ("files/manifests/" + episode_name, json.dumps(plan).encode(), "episodes", 1, "episode_plan_path"),
+                ("files/manifests/source_book_comic_series_plan.json", json.dumps(series).encode(),
+                 "project", "source_book", "series_plan_path"),
+                ("files/media/assets/10/source_book_hero.png", b"asset", "assets", 10, "file_path"),
+                ("files/media/outputs/20/source_book_ep01_p001_panel01_v001.png", b"panel", "outputs", 20, "file_path"),
+            ]
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                for name, content, *_ in specs:
+                    archive.writestr(name, content)
+            manifest = {"files": [{"archive_path": name, "references": [{"table": table, "id": row_id, "field": field}]}
+                                  for name, _, table, row_id, field in specs]}
+            saved_episodes = []
+            saved_outputs = []
+            with patch.multiple(server, PROJECT_MANIFESTS_ROOT=root / "manifests", NOVELS_DIR=root / "novels"):
+                with patch.object(server, "runtime_config", return_value={"COMIC_PIPELINE_OUTPUT_ROOT": str(root / "output")}):
+                    with patch.object(server, "read_project_backup_archive", return_value={"raw": stream.getvalue(), "manifest": manifest, "data": data}):
+                        with patch.multiple(server.db,
+                                            get_project=lambda *args: None,
+                                            upsert_project=lambda url, project: project,
+                                            replace_project_chapters=lambda *args: None,
+                                            replace_project_episodes=lambda url, slug, rows: saved_episodes.extend(rows),
+                                            upsert_visual_asset=lambda url, slug, row: {**row, "id": 100},
+                                            upsert_generated_output=lambda url, slug, row: saved_outputs.append(row) or {**row, "id": 200}):
+                            result = server.import_project_backup_api({"target_slug": "restored-book", "content_base64": "eA=="})
+                            result_two = server.import_project_backup_api({"target_slug": "second-book", "content_base64": "eA=="})
+            imported_plan_path = root / "manifests/restored-book/restored_book_episode01_pages.json"
+            self.assertTrue(imported_plan_path.is_file())
+            imported_plan = json.loads(imported_plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(imported_plan["episode_id"], "RESTORED_BOOK_EP01")
+            self.assertEqual(imported_plan["manifest_dir"], str(imported_plan_path.parent))
+            self.assertEqual(imported_plan["pages"][0]["panels"][0]["panel_id"], "RESTORED_BOOK_EP01_P001_PANEL01")
+            self.assertEqual(imported_plan["pages"][0]["panels"][0]["prompt"], plan["pages"][0]["panels"][0]["prompt"])
+            imported_asset = Path(imported_plan["asset_aliases"]["hero"])
+            self.assertEqual(imported_asset.read_bytes(), b"asset")
+            self.assertEqual(saved_episodes[0]["episode_plan_path"], str(imported_plan_path))
+            self.assertEqual(saved_episodes[0]["episode_id"], "RESTORED_BOOK_EP01")
+            imported_series = json.loads(Path(result["project"]["series_plan_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(imported_series["episodes"][0]["episode_plan_path"], str(imported_plan_path))
+            imported_output = root / "output/Imported/restored-book"
+            self.assertEqual(result["project"]["project_config"]["output_root"], str(imported_output))
+            self.assertEqual(Path(saved_outputs[0]["file_path"]).parent, imported_output / "panels")
+            self.assertEqual(Path(saved_outputs[0]["file_path"]).name, "RESTORED_BOOK_EP01_P001_PANEL01_v001.png")
+            self.assertEqual(saved_outputs[0]["panel_id"], "RESTORED_BOOK_EP01_P001_PANEL01")
+            self.assertEqual(data["project"]["slug"], "source_book")
+            second_plan = root / "manifests/second-book/second_book_episode01_pages.json"
+            second_document = json.loads(second_plan.read_text(encoding="utf-8"))
+            self.assertEqual(second_document["episode_id"], "SECOND_BOOK_EP01")
+            self.assertNotEqual(second_document["asset_aliases"]["hero"], imported_plan["asset_aliases"]["hero"])
+            self.assertNotEqual(result_two["project"]["project_config"]["output_root"], str(imported_output))
+            self.assertEqual(imported_plan_path.read_text(encoding="utf-8"), json.dumps(imported_plan, ensure_ascii=False, indent=2))
+
     def test_generation_context_includes_review_feedback_for_regeneration(self):
         server = load_server_module()
         block = server.generation_context_prompt_block({

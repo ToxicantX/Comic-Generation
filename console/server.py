@@ -9200,6 +9200,7 @@ def create_project_backup_archive(slug: str, include_media: bool = False) -> dic
         checksums[spec["archive_path"]] = checksum
         files.append({
             "archive_path": spec["archive_path"],
+            "source_path": str(spec["source"]),
             "kind": spec["kind"],
             "size": size,
             "sha256": checksum,
@@ -9321,6 +9322,17 @@ def import_project_backup_api(payload: dict) -> dict:
     target_title = str(payload.get("target_title") or f"{source_project.get('title') or source_slug}（导入）").strip()
     target_manifest_dir = PROJECT_MANIFESTS_ROOT / target_slug
     target_output_dir = Path(runtime_config().get("COMIC_PIPELINE_OUTPUT_ROOT") or (ROOT / "output")) / "Imported" / target_slug
+    source_prefixes = {source_slug, slug_token(source_slug), slug_token(source_slug).lower()}
+    if source_project.get("legacy"):
+        source_prefixes.update({"ssj_comic", "SSJ_COMIC", "sou_shen_ji"})
+
+    def migrated_name(value: str) -> str:
+        for prefix in sorted(source_prefixes, key=len, reverse=True):
+            if value == prefix or value.startswith(prefix + "_"):
+                token = slug_token(target_slug)
+                return (token if prefix.isupper() else token.lower()) + value[len(prefix):]
+        return value
+
     archive_targets: dict[str, Path] = {}
     novel_targets = []
     for item in manifest.get("files") or []:
@@ -9331,11 +9343,22 @@ def import_project_backup_api(payload: dict) -> dict:
             target = NOVELS_DIR / f"{target_slug}{suffix}"
             novel_targets.append(target)
         elif archive_path.startswith("files/manifests/"):
-            target = target_manifest_dir.joinpath(*relative.parts[2:])
+            target = target_manifest_dir.joinpath(*(migrated_name(part) for part in relative.parts[2:]))
         elif archive_path.startswith("files/project/"):
             target = target_manifest_dir.joinpath("supplemental", *relative.parts[2:])
         elif archive_path.startswith("files/media/"):
-            target = target_output_dir.joinpath(*relative.parts[2:])
+            output_reference = next((ref for ref in item.get("references") or []
+                                     if ref.get("table") == "outputs" and ref.get("field") == "file_path"), None)
+            if output_reference:
+                output = next((row for row in data.get("outputs") or [] if str(row.get("id")) == str(output_reference.get("id"))), {})
+                folder = "pages" if output.get("output_type") == "page" else "panels"
+                filename = PurePosixPath(str(output.get("file_path") or "").replace("\\", "/")).name or relative.name
+                validate_backup_member_name(filename)
+                target = target_output_dir / folder / migrated_name(filename)
+            elif relative.parts[2] == "assets":
+                target = target_output_dir / "assets" / relative.parts[3] / migrated_name(relative.name)
+            else:
+                target = target_output_dir.joinpath(*(migrated_name(part) for part in relative.parts[2:]))
         else:
             raise ValueError(f"备份包含未知文件区域：{archive_path}")
         archive_targets[archive_path] = target
@@ -9345,12 +9368,60 @@ def import_project_backup_api(payload: dict) -> dict:
         raise ValueError("目标项目目录已存在，导入不会覆盖现有文件")
 
     references = {}
+    source_paths = {}
+    source_manifest_dir = str(source_project.get("manifest_dir") or "").replace("\\", "/").rstrip("/")
     for item in manifest.get("files") or []:
         archive_path = item["archive_path"]
         target = archive_targets[archive_path]
+        if item.get("source_path"):
+            source_paths[str(item["source_path"]).replace("\\", "/")] = str(target)
+        if archive_path.startswith("files/manifests/") and source_manifest_dir:
+            source_paths[source_manifest_dir + "/" + archive_path.removeprefix("files/manifests/")] = str(target)
         for reference in item.get("references") or []:
             key = (str(reference.get("table") or ""), str(reference.get("id") or ""), str(reference.get("field") or ""))
             references[key] = str(target)
+            table, row_id, field = key
+            row = source_project if table == "project" else next((row for row in data.get(table) or []
+                   if str(row.get("episode_number") if table == "episodes" else row.get("id")) == row_id), {})
+            if row.get(field):
+                source_paths[str(row[field]).replace("\\", "/")] = str(target)
+
+    source_output_roots = set()
+    source_config = source_project.get("project_config") if isinstance(source_project.get("project_config"), dict) else {}
+    configured_output = source_config.get("output_root")
+    if configured_output:
+        source_output_roots.add(str(configured_output).replace("\\", "/").rstrip("/"))
+    for table in ("assets", "outputs", "versions"):
+        for row in data.get(table) or []:
+            value = str(row.get("file_path") or "").replace("\\", "/")
+            for folder in ("assets", "panels", "pages"):
+                if f"/{folder}/" in value:
+                    source_output_roots.add(value.split(f"/{folder}/", 1)[0])
+
+    # Rewrite structured identifiers and paths, not prose or prompt substrings.
+    def migrated_value(value):
+        if isinstance(value, dict):
+            return {migrated_name(key): (target_slug if key in {"slug", "project_slug"} and item == source_slug else migrated_value(item))
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [migrated_value(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        normalized = value.replace("\\", "/")
+        if normalized in source_paths:
+            return source_paths[normalized]
+        if source_manifest_dir and (normalized == source_manifest_dir or normalized.startswith(source_manifest_dir + "/")):
+            suffix = normalized[len(source_manifest_dir):].strip("/")
+            return str(target_manifest_dir.joinpath(*(migrated_name(part) for part in suffix.split("/") if part)))
+        for source_root in sorted(source_output_roots, key=len, reverse=True):
+            if normalized == source_root or normalized.startswith(source_root + "/"):
+                suffix = normalized[len(source_root):].strip("/")
+                return str(target_output_dir.joinpath(*(migrated_name(part) for part in suffix.split("/") if part)))
+        if normalized.startswith("ComicPipeline/"):
+            return "/".join(migrated_name(part) for part in normalized.split("/"))
+        return migrated_name(value)
+
+    data = migrated_value(data)
 
     def referenced_path(table: str, row_id, field: str, fallback: str = "") -> str:
         return references.get((table, str(row_id), field), fallback)
@@ -9364,6 +9435,10 @@ def import_project_backup_api(payload: dict) -> dict:
                 with archive.open(archive_path) as source, target.open("wb") as destination:
                     shutil.copyfileobj(source, destination, 1024 * 1024)
                 written_files.append(target)
+                if archive_path.startswith(("files/manifests/", "files/project/")) and target.suffix.lower() == ".json":
+                    document = read_optional_json(target)
+                    if document is not None:
+                        target.write_text(json.dumps(migrated_value(document), ensure_ascii=False, indent=2), encoding="utf-8")
 
         project = db.upsert_project(database_url(), {
             "slug": target_slug,
@@ -9374,7 +9449,7 @@ def import_project_backup_api(payload: dict) -> dict:
             "series_plan_path": referenced_path("project", source_slug, "series_plan_path", str(target_manifest_dir / f"{target_slug}_comic_series_plan.json")),
             "legacy": False,
             "status": "active",
-            "project_config": source_project.get("project_config") if isinstance(source_project.get("project_config"), dict) else {},
+            "project_config": {**migrated_value(source_config), "output_root": str(target_output_dir)},
         })
         created_project = True
 
